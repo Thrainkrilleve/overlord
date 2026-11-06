@@ -129,6 +129,12 @@ src/
     └── voice/                # Join-to-create temporary voice channels
 ```
 
+
+## Contributing
+
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [code of conduct](CODE_OF_CONDUCT.md).
+
+To report a vulnerability, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
 ## License
 
 MIT. See [LICENSE](LICENSE).
