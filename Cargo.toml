@@ -1,0 +1,21 @@
+[package]
+name = "overlord"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model", "builder", "cache"] }
+# Default features would force serenity's rustls 0.22 backend, which has unpatched advisories
+poise = { version = "0.6", default-features = false, features = ["cache", "chrono", "handle_panics"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.10"
+rand = "0.8"
+anyhow = "1.0"

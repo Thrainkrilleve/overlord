@@ -1,0 +1,13 @@
+services:
+  overlord:
+    build: .
+    container_name: discord-overlord
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Takes precedence over .env so the database always lives in the persistent ./data volume
+      - DATABASE_URL=sqlite:///app/data/overlord.db?mode=rwc
+    volumes:
+      - ./data:/app/data
+
