@@ -1,6 +1,7 @@
-use serenity::all::{CreateEmbed, CreateMessage, Timestamp, User};
+use crate::guild_settings::GuildSettings;
 use crate::util::{embed_field, send_mod_log};
 use crate::{Data, Error};
+use serenity::all::{CreateEmbed, CreateMessage, GuildId, Timestamp, User};
 
 type Context<'a> = poise::Context<'a, Data, Error>;
 
@@ -18,8 +19,11 @@ async fn ensure_can_moderate(ctx: Context<'_>, target: &User) -> Result<(), Erro
     let moderator = guild_id.member(http, ctx.author().id).await?;
 
     let allowed = {
-        let guild = ctx.guild().ok_or("Server is not cached yet, try again shortly")?;
-        let position = |m: &serenity::all::Member| guild.member_highest_role(m).map_or(0, |r| r.position);
+        let guild = ctx
+            .guild()
+            .ok_or("Server is not cached yet, try again shortly")?;
+        let position =
+            |m: &serenity::all::Member| guild.member_highest_role(m).map_or(0, |r| r.position);
         if target.id == guild.owner_id {
             false
         } else {
@@ -28,28 +32,74 @@ async fn ensure_can_moderate(ctx: Context<'_>, target: &User) -> Result<(), Erro
     };
 
     if !allowed {
-        return Err("You can't moderate a member whose highest role is equal to or above yours.".into());
+        return Err(
+            "You can't moderate a member whose highest role is equal to or above yours.".into(),
+        );
     }
     Ok(())
 }
 
 /// DM the user about a moderation action. Must run before a kick/ban, while the bot still
 /// shares a server with them. Users with DMs closed are silently skipped.
+fn with_log_hint(embed: CreateEmbed, settings: &GuildSettings) -> CreateEmbed {
+    if settings.mod_log_channel_id.is_none() {
+        embed.field(
+            "Mod Log",
+            "Not set for this server, so this action was not logged. An admin can set it with `/config set`.",
+            false,
+        )
+    } else {
+        embed
+    }
+}
+
+async fn finish_mod_action(
+    ctx: Context<'_>,
+    guild_id: GuildId,
+    settings: &GuildSettings,
+    embed: CreateEmbed,
+) -> Result<(), Error> {
+    let embed = with_log_hint(embed, settings);
+    ctx.send(poise::CreateReply::default().embed(embed.clone()))
+        .await?;
+    send_mod_log(
+        ctx.serenity_context(),
+        guild_id,
+        settings.mod_log_channel_id,
+        embed,
+    )
+    .await;
+    Ok(())
+}
+
 async fn notify_user(ctx: Context<'_>, user: &User, action: &str, reason: &str) {
-    let guild_name = ctx.guild().map(|g| g.name.clone()).unwrap_or_else(|| "the server".into());
-    let dm = CreateMessage::new().content(format!("You were {} in **{}**: {}", action, guild_name, reason));
+    let guild_name = ctx
+        .guild()
+        .map(|g| g.name.clone())
+        .unwrap_or_else(|| "the server".into());
+    let dm = CreateMessage::new().content(format!(
+        "You were {} in **{}**: {}",
+        action, guild_name, reason
+    ));
     let _ = user.direct_message(&ctx.serenity_context().http, dm).await;
 }
 
 /// Issue a warning to a server member
-#[poise::command(slash_command, guild_only, default_member_permissions = "MODERATE_MEMBERS")]
+#[poise::command(
+    slash_command,
+    guild_only,
+    default_member_permissions = "MODERATE_MEMBERS"
+)]
 pub async fn warn(
     ctx: Context<'_>,
     #[description = "The user to warn"] user: User,
-    #[description = "Reason for the warning"] #[max_length = 500] reason: String,
+    #[description = "Reason for the warning"]
+    #[max_length = 500]
+    reason: String,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("Must be run in a server")?;
+    let settings = crate::guild_settings::load(&ctx.data().db, guild_id.get()).await?;
     let moderator_id = ctx.author().id;
     ensure_can_moderate(ctx, &user).await?;
 
@@ -72,32 +122,45 @@ pub async fn warn(
         .field("Reason", &reason, false)
         .timestamp(chrono::Utc::now());
 
-    ctx.send(poise::CreateReply::default().embed(embed.clone())).await?;
     notify_user(ctx, &user, "warned", &reason).await;
-    send_mod_log(&ctx.serenity_context().http, ctx.data().config.mod_log_channel_id, embed).await;
+    finish_mod_action(ctx, guild_id, &settings, embed).await?;
 
     Ok(())
 }
 
 /// Temporarily timeout/mute a server member
-#[poise::command(slash_command, guild_only, default_member_permissions = "MODERATE_MEMBERS")]
+#[poise::command(
+    slash_command,
+    guild_only,
+    default_member_permissions = "MODERATE_MEMBERS"
+)]
 pub async fn timeout(
     ctx: Context<'_>,
     #[description = "The user to timeout"] user: User,
     // Discord caps timeouts at 28 days
-    #[description = "Duration in minutes (max 40320 = 28 days)"] #[min = 1] #[max = 40320] minutes: u32,
-    #[description = "Reason for timeout"] #[max_length = 500] reason: String,
+    #[description = "Duration in minutes (max 40320 = 28 days)"]
+    #[min = 1]
+    #[max = 40320]
+    minutes: u32,
+    #[description = "Reason for timeout"]
+    #[max_length = 500]
+    reason: String,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("Must be run in a server")?;
+    let settings = crate::guild_settings::load(&ctx.data().db, guild_id.get()).await?;
     let moderator_id = ctx.author().id;
     ensure_can_moderate(ctx, &user).await?;
 
-    let mut member = guild_id.member(&ctx.serenity_context().http, user.id).await?;
+    let mut member = guild_id
+        .member(&ctx.serenity_context().http, user.id)
+        .await?;
     let until = chrono::Utc::now() + chrono::Duration::minutes(minutes as i64);
     let timestamp = Timestamp::from_unix_timestamp(until.timestamp())?;
 
-    member.disable_communication_until_datetime(&ctx.serenity_context().http, timestamp).await?;
+    member
+        .disable_communication_until_datetime(&ctx.serenity_context().http, timestamp)
+        .await?;
 
     let case_id = crate::database::record_infraction(
         &ctx.data().db,
@@ -119,9 +182,14 @@ pub async fn timeout(
         .field("Reason", &reason, false)
         .timestamp(chrono::Utc::now());
 
-    ctx.send(poise::CreateReply::default().embed(embed.clone())).await?;
-    notify_user(ctx, &user, &format!("timed out for {} minutes", minutes), &reason).await;
-    send_mod_log(&ctx.serenity_context().http, ctx.data().config.mod_log_channel_id, embed).await;
+    notify_user(
+        ctx,
+        &user,
+        &format!("timed out for {} minutes", minutes),
+        &reason,
+    )
+    .await;
+    finish_mod_action(ctx, guild_id, &settings, embed).await?;
 
     Ok(())
 }
@@ -131,14 +199,19 @@ pub async fn timeout(
 pub async fn kick(
     ctx: Context<'_>,
     #[description = "The user to kick"] user: User,
-    #[description = "Reason for kick"] #[max_length = 500] reason: String,
+    #[description = "Reason for kick"]
+    #[max_length = 500]
+    reason: String,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("Must be run in a server")?;
+    let settings = crate::guild_settings::load(&ctx.data().db, guild_id.get()).await?;
     ensure_can_moderate(ctx, &user).await?;
 
     notify_user(ctx, &user, "kicked", &reason).await;
-    guild_id.kick_with_reason(&ctx.serenity_context().http, user.id, &reason).await?;
+    guild_id
+        .kick_with_reason(&ctx.serenity_context().http, user.id, &reason)
+        .await?;
 
     let case_id = crate::database::record_infraction(
         &ctx.data().db,
@@ -159,8 +232,7 @@ pub async fn kick(
         .field("Reason", &reason, false)
         .timestamp(chrono::Utc::now());
 
-    ctx.send(poise::CreateReply::default().embed(embed.clone())).await?;
-    send_mod_log(&ctx.serenity_context().http, ctx.data().config.mod_log_channel_id, embed).await;
+    finish_mod_action(ctx, guild_id, &settings, embed).await?;
     Ok(())
 }
 
@@ -169,16 +241,21 @@ pub async fn kick(
 pub async fn ban(
     ctx: Context<'_>,
     #[description = "The user to ban"] user: User,
-    #[description = "Reason for ban"] #[max_length = 500] reason: String,
+    #[description = "Reason for ban"]
+    #[max_length = 500]
+    reason: String,
     #[description = "Days of messages to delete (0-7)"] d_days: Option<u8>,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("Must be run in a server")?;
+    let settings = crate::guild_settings::load(&ctx.data().db, guild_id.get()).await?;
     let delete_days = d_days.unwrap_or(1).min(7);
     ensure_can_moderate(ctx, &user).await?;
 
     notify_user(ctx, &user, "banned", &reason).await;
-    guild_id.ban_with_reason(&ctx.serenity_context().http, user.id, delete_days, &reason).await?;
+    guild_id
+        .ban_with_reason(&ctx.serenity_context().http, user.id, delete_days, &reason)
+        .await?;
 
     let case_id = crate::database::record_infraction(
         &ctx.data().db,
@@ -199,16 +276,22 @@ pub async fn ban(
         .field("Reason", &reason, false)
         .timestamp(chrono::Utc::now());
 
-    ctx.send(poise::CreateReply::default().embed(embed.clone())).await?;
-    send_mod_log(&ctx.serenity_context().http, ctx.data().config.mod_log_channel_id, embed).await;
+    finish_mod_action(ctx, guild_id, &settings, embed).await?;
     Ok(())
 }
 
 /// Bulk delete messages from the current channel
-#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_MESSAGES")]
+#[poise::command(
+    slash_command,
+    guild_only,
+    default_member_permissions = "MANAGE_MESSAGES"
+)]
 pub async fn purge(
     ctx: Context<'_>,
-    #[description = "Number of messages to delete (1-100)"] #[min = 1] #[max = 100] count: u8,
+    #[description = "Number of messages to delete (1-100)"]
+    #[min = 1]
+    #[max = 100]
+    count: u8,
 ) -> Result<(), Error> {
     // Ephemeral, so the "thinking..." reply is not a channel message that gets purged itself
     ctx.defer_ephemeral().await?;
@@ -218,7 +301,10 @@ pub async fn purge(
     // Discord's bulk delete rejects the whole request if any message is older than 14 days
     let cutoff = chrono::Utc::now().timestamp() - 14 * 24 * 60 * 60;
     let messages: Vec<_> = channel_id
-        .messages(http, serenity::all::GetMessages::new().limit(count.clamp(1, 100)))
+        .messages(
+            http,
+            serenity::all::GetMessages::new().limit(count.clamp(1, 100)),
+        )
         .await?
         .into_iter()
         .filter(|m| m.timestamp.unix_timestamp() > cutoff)
@@ -232,16 +318,26 @@ pub async fn purge(
 
     let skipped = count as usize - deleted;
     let note = if skipped > 0 {
-        format!(" ({} older than 14 days or not found were skipped)", skipped)
+        format!(
+            " ({} older than 14 days or not found were skipped)",
+            skipped
+        )
     } else {
         String::new()
     };
-    ctx.send(poise::CreateReply::default().content(format!("🧹 Purged {} messages{}.", deleted, note))).await?;
+    ctx.send(
+        poise::CreateReply::default().content(format!("🧹 Purged {} messages{}.", deleted, note)),
+    )
+    .await?;
     Ok(())
 }
 
 /// View infraction history for a user
-#[poise::command(slash_command, guild_only, default_member_permissions = "MODERATE_MEMBERS")]
+#[poise::command(
+    slash_command,
+    guild_only,
+    default_member_permissions = "MODERATE_MEMBERS"
+)]
 pub async fn infractions(
     ctx: Context<'_>,
     #[description = "User to inspect"] user: User,
@@ -249,10 +345,15 @@ pub async fn infractions(
     ctx.defer().await?;
     let guild_id = ctx.guild_id().ok_or("Must be run in a server")?;
 
-    let history = crate::database::get_infractions(&ctx.data().db, user.id.get(), guild_id.get()).await?;
+    let history =
+        crate::database::get_infractions(&ctx.data().db, user.id.get(), guild_id.get()).await?;
 
     if history.is_empty() {
-        ctx.send(poise::CreateReply::default().content(format!("No previous infractions found for {}.", user.tag()))).await?;
+        ctx.send(
+            poise::CreateReply::default()
+                .content(format!("No previous infractions found for {}.", user.tag())),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -262,9 +363,17 @@ pub async fn infractions(
 
     for inf in history.iter().take(10) {
         embed = embed.field(
-            format!("[Case #{}] Action: {}", inf.id, inf.action.to_uppercase()),
+            format!(
+                "[Case #{}] Action: {}",
+                inf.case_number,
+                inf.action.to_uppercase()
+            ),
             // 10 fields share the 6000-char embed budget, so keep each reason short
-            format!("**Reason**: {}\n**Date**: {}", embed_field(&inf.reason, 300), inf.created_at),
+            format!(
+                "**Reason**: {}\n**Date**: {}",
+                embed_field(&inf.reason, 300),
+                inf.created_at
+            ),
             false,
         );
     }

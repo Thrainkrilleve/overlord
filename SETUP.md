@@ -3,6 +3,9 @@
 This guide takes you from nothing to a running bot, about 20–30 minutes. Do the steps in order:
 the bot needs the roles and channels to exist before you can fill in its settings.
 
+One Overlord process can be in many servers. Each server has its own channels, roles, and
+account-age rule. Nothing from one server is posted or applied in another.
+
 **You will need:** a Discord server where you are the owner or an Administrator, and a computer that
 stays on with [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker on Linux) installed.
 
@@ -93,15 +96,19 @@ In the project folder, copy the example file:
 cp .env.example .env
 ```
 
-Open `.env` in a text editor and fill in each value (right-click the item in Discord → **Copy ID**):
+Open `.env` in a text editor. The token is required. `GUILD_ID` and the channel and role IDs are
+the **starting settings for this first server**. The first time the bot starts, it copies them
+into the database for that server only. After that, change them in Discord with `/config set`.
+Editing the IDs in `.env` again does not overwrite a server that already has saved settings.
 
 | Setting | What to copy |
 | :--- | :--- |
 | `DISCORD_TOKEN` | The bot token from step 1 |
-| `GUILD_ID` | Right-click your **server icon** → Copy Server ID. Makes slash commands appear instantly. |
+| `GUILD_ID` | Right-click your **server icon** → Copy Server ID. This is the server that receives the IDs below. |
+| `DEV_GUILD_ONLY` | Leave unset. Set to `true` only on a development machine, to register slash commands in `GUILD_ID` and nowhere else. |
 | `DATABASE_URL` | Leave as is. Docker overrides it to store data in `./data`. |
 | `HONEYPOT_CHANNEL_ID` | `#honeypot` |
-| `VERIFY_CHANNEL_ID` | `#verify` (shown in `/security_status`; optional) |
+| `VERIFY_CHANNEL_ID` | `#verify` (shown in `/security_status`; optional). `/setup_verification` also saves the channel you run it in. |
 | `MOD_LOG_CHANNEL_ID` | `#mod-log` |
 | `TRANSCRIPT_CHANNEL_ID` | `#transcripts`. **Required for tickets**: a ticket can't be closed until it's set, so no history is ever lost. |
 | `JOIN_TO_CREATE_CHANNEL_ID` | The `➕ Join to Create` voice channel |
@@ -112,7 +119,8 @@ Open `.env` in a text editor and fill in each value (right-click the item in Dis
 | `MOD_ROLE_ID` | `Staff` role |
 | `MIN_ACCOUNT_AGE_DAYS` | Accounts younger than this get flagged in `#mod-log`. Default 3. |
 
-To switch a feature off, delete its line (e.g. remove `HONEYPOT_CHANNEL_ID` to disable the trap).
+To leave a feature off for this first server, delete its line (for example remove `HONEYPOT_CHANNEL_ID`).
+In a server that is already saved, use `/config clear` instead.
 
 ## 8. Start the bot
 
@@ -128,9 +136,15 @@ The first build takes a few minutes. Then watch the logs:
 docker compose logs -f
 ```
 
-You should see `Bot online as Overlord#1234` and `Registering slash commands to guild ID: ...`.
-Any `WARN ... unset` lines tell you which settings are missing. Press `Ctrl+C` to stop watching;
-the bot keeps running. It restarts automatically after crashes or reboots (as long as Docker is running).
+You should see `Bot online as Overlord#1234`, `Registering slash commands globally`, and
+`Registered slash commands in guild ...` for each server the bot is already in. A line about
+saving `.env` settings means this first server was copied into the database. Any
+`WARN Guild ... is unset` lines tell you which features are still off. Press `Ctrl+C` to stop
+watching; the bot keeps running. It restarts automatically after crashes or reboots (as long as Docker is running).
+
+Slash commands are registered in every joined server, including when the bot is invited to a new
+one, and also globally. A server shows one copy of each command. With `DEV_GUILD_ONLY=true`,
+commands are registered only in `GUILD_ID`.
 
 ## 9. Post the panels
 
@@ -138,7 +152,8 @@ In Discord:
 
 1. In `#verify`, run `/setup_verification`. This posts the **Verify Identity** button.
 2. In `#support`, run `/setup_tickets`. This posts the three ticket buttons.
-3. Anywhere, run `/security_status` to confirm the channels and roles were picked up.
+3. Anywhere, run `/config show` or `/security_status` to confirm the channels and roles were picked up.
+   Both replies are visible only to you, because they name the honeypot channel.
 
 The panels keep working across bot restarts; you only post them once.
 
@@ -160,21 +175,52 @@ Use an alt account (or a friend) that is **not** staff:
 - [ ] **Honeypot (real ban, optional, do last)**: the alt posts in `#honeypot` and is banned. If `#mod-log`
       says "the ban failed", the bot's role is too low. Unban the alt in Server Settings → Bans.
 
+## 11. Add another server
+
+Invite the same bot with the link from step 2. In the new server, create the roles and channels
+you want (steps 4–6), then set them in Discord. Nothing is copied from the first server.
+
+1. Run `/config set` once per value you want on: mod log, transcript, staff role, member role,
+   unverified role, honeypot, verify channel, ticket category, join-to-create channel, temp voice
+   category, and minimum account age. Pick the channel or role from that server. A channel or role
+   from a different server is rejected.
+2. Run `/config show` and check each field.
+3. In `#verify`, run `/setup_verification`. In `#support`, run `/setup_tickets`.
+4. Until a feature is set, it stays off in that server. Closing a ticket tells staff to set a
+   transcript channel. Verification tells the member when no member role is set.
+
+`/security_status`, mod logs, raid alerts, role grants, ticket channels, and transcripts all use
+the server the command or event happened in.
+
 ## Troubleshooting
 
 | Symptom | Fix |
 | :--- | :--- |
 | Bot doesn't start; logs mention **Disallowed intents** | Turn on both privileged intents (step 1) and restart: `docker compose restart`. |
-| Slash commands don't show up | Check `GUILD_ID` is your server's ID. Without it, commands register globally and can take up to an hour. Re-invite with the link in step 2 if `applications.commands` was missing. |
+| Slash commands don't show up | Leave `DEV_GUILD_ONLY` unset so commands register in every server. Global registration can take up to an hour if the per-server update failed; check the logs for `Could not register slash commands`. Re-invite with the link in step 2 if `applications.commands` was missing. |
 | "Verification Incomplete" / roles not assigned / "Missing Permissions" in the logs | The bot's role is too low. Drag it above `Member` and `Unverified` (step 4). |
 | `/ban` or `/kick` says "You can't moderate a member whose highest role is equal to or above yours" | Working as intended: moderators can only act on people below them. |
-| "Transcript could not be archived" when closing a ticket | Set `TRANSCRIPT_CHANNEL_ID` and make sure the bot can post and attach files there. |
+| "Transcript could not be archived" when closing a ticket | Run `/config set` and choose this server's transcript channel. The bot must be able to post and attach files there. |
+| A new server does nothing (no role, no log, no rooms) | That server has no saved settings yet. Run `/config set` there. Settings are never copied from another server. |
 | AutoMod or honeypot does nothing | Message Content Intent is off, or the bot can't see the channel. Staff are exempt from AutoMod by design. |
 | Temp voice rooms aren't created | Bot needs Manage Channels, Connect and Move Members in the `Voice Rooms` category. |
 
 ## Updating and backups
 
-- **Update:** pull the new code, then run `docker compose up -d --build` again.
-- **Backup:** all data (infractions, tickets) is in `data/overlord.db`. Copy that file somewhere safe.
+From the project folder, with the existing `.env` and `./data` directory left in place:
+
+```bash
+git pull
+docker compose up -d --build
+docker compose logs -f
+```
+
+On startup the bot opens `./data/overlord.db` (the same file as before) and applies any new
+schema itself. You do not run a migration command, and you do not delete `./data`. The first start
+after this upgrade copies the channel, role, and account-age values from `.env` into the `GUILD_ID`
+server **only if that server has no saved settings yet**. Later edits in `.env` do not replace them.
+Use `/config set` for changes, and for every additional server.
+
+- **Backup:** infractions, tickets, temp-voice rooms, and per-server settings are in `data/overlord.db`. Copy that file somewhere safe before upgrading.
 - **Stop:** `docker compose down`. Your data stays in `./data`.
-- **Run without Docker** (for testing): install Rust 1.88+, then `cargo run --release` in the project folder.
+- **Run without Docker** (for testing): install Rust 1.88+, then `cargo run --release` in the project folder. The database file is the one in `DATABASE_URL`, and the same migration runs on startup.

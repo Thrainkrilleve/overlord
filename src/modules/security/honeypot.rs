@@ -1,21 +1,31 @@
+use crate::database::DbPool;
 use serenity::all::{Context, CreateEmbed, Message};
 use tracing::{error, info};
 
 pub async fn handle_honeypot_message(
     ctx: &Context,
     msg: &Message,
-    honeypot_channel_id: u64,
-    mod_log_channel_id: Option<u64>,
-    mod_role_id: Option<u64>,
+    db: &DbPool,
 ) -> anyhow::Result<()> {
-    if msg.channel_id.get() != honeypot_channel_id || msg.author.bot {
+    if msg.author.bot {
         return Ok(());
     }
 
+    // Settings are loaded from this message's guild. A trap configured in another server
+    // cannot see this message, and the ban is issued in this guild only.
     let guild_id = match msg.guild_id {
         Some(g) => g,
         None => return Ok(()),
     };
+    let settings = crate::guild_settings::load(db, guild_id.get()).await?;
+    let Some(honeypot_channel_id) = settings.honeypot_channel_id else {
+        return Ok(());
+    };
+    if msg.channel_id.get() != honeypot_channel_id {
+        return Ok(());
+    }
+    let mod_log_channel_id = settings.mod_log_channel_id;
+    let mod_role_id = settings.mod_role_id;
 
     let author_id = msg.author.id;
     let author_tag = format!("{} ({})", msg.author.tag(), author_id.get());
@@ -39,7 +49,7 @@ pub async fn handle_honeypot_message(
             .field("Staff Member", author_tag, false)
             .field("Message Content", message_snippet, false)
             .timestamp(chrono::Utc::now());
-        crate::util::send_mod_log(&ctx.http, mod_log_channel_id, embed).await;
+        crate::util::send_mod_log(ctx, guild_id, mod_log_channel_id, embed).await;
         return Ok(());
     }
 
@@ -47,7 +57,9 @@ pub async fn handle_honeypot_message(
 
     // 2. Ban offender
     let ban_reason = "Overlord Security: Honeypot Trigger (Automated Scraper/Raid Trap)";
-    let ban_result = guild_id.ban_with_reason(&ctx.http, author_id, 1, ban_reason).await;
+    let ban_result = guild_id
+        .ban_with_reason(&ctx.http, author_id, 1, ban_reason)
+        .await;
     if let Err(e) = &ban_result {
         error!("Failed to ban honeypot violator {}: {}", author_id, e);
     }
@@ -82,7 +94,7 @@ pub async fn handle_honeypot_message(
         .field("Action Taken", action, true)
         .field("Message Content", message_snippet, false)
         .timestamp(chrono::Utc::now());
-    crate::util::send_mod_log(&ctx.http, mod_log_channel_id, embed).await;
+    crate::util::send_mod_log(ctx, guild_id, mod_log_channel_id, embed).await;
 
     Ok(())
 }

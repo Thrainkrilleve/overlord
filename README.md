@@ -13,11 +13,11 @@
 
 ### 1. 🚨 Security & Honeypot Bot Traps
 * **Honeypot Trap Channel**: Designate an invisible or restricted trap channel. Any scraper, self-bot, or automated spam script sending a message is **instantly banned** and purged from the server. Staff posts are deleted and logged as a test, never banned.
-* **Account Age Filter**: Detects newly registered accounts (e.g., < 3 days) or default-avatar accounts and sends security alerts to staff logs.
-* **Anti-Raid Join Tracker**: Sliding-window join monitor detects raid surges (5+ joins within 10 seconds) and alerts staff, at most once a minute during a sustained raid.
+* **Account Age Filter**: Detects newly registered accounts (e.g., < 3 days) or default-avatar accounts and sends security alerts to that server's staff log.
+* **Anti-Raid Join Tracker**: Sliding-window join monitor detects raid surges (5+ joins within 10 seconds) per server and alerts that server's staff, at most once a minute during a sustained raid.
 
 ### 2. 🛡️ Verification Gate & Onboarding
-* **Code Verification**: Button-triggered modal (`/setup_verification`) showing a random one-time code per user, valid for 5 minutes.
+* **Code Verification**: Button-triggered modal (`/setup_verification`) showing a random one-time code per user in that server, valid for 5 minutes. A code from one server cannot be used in another.
 * **Automated Role Provisioning**: Automatically revokes the `Unverified` role and assigns the verified `Member` role upon successful completion.
 
 ### 3. 🎫 Interactive Support Ticket System
@@ -63,11 +63,13 @@
    - Permissions needed: `Administrator` (or View Channels, Manage Channels, Manage Roles, Kick, Ban, Timeout, Manage Messages, Move Members).
 
 ### Configuration (`.env`)
-Copy `.env.example` to `.env` and fill in your server IDs:
+Copy `.env.example` to `.env` and fill in the token. `GUILD_ID` plus the channel and role IDs are the **initial settings for that one server**. They are copied into the database the first time the bot starts. Every server the bot is in, including that one afterwards, is configured with `/config set`.
 
 ```bash
 cp .env.example .env
 ```
+
+One process can be invited to many servers. Logs, roles, tickets, transcripts, verification codes, and raid tracking stay inside the server the event came from. A feature that has not been configured in a server does nothing there.
 
 ---
 
@@ -103,13 +105,16 @@ cargo run --release
 | :--- | :--- | :--- |
 | `/setup_verification` | Administrator | Deploys the interactive human verification gate in the current channel. |
 | `/setup_tickets` | Administrator | Deploys the support & ticket assistance hub in the current channel. |
-| `/security_status` | Administrator | Displays live status of honeypots, log channels, roles, and security policies. |
+| `/security_status` | Administrator | Displays this server's honeypot, log channels, roles, and security policy. Only visible to you. |
+| `/config show` | Administrator | Shows this server's saved settings. Only visible to you. |
+| `/config set` | Administrator | Sets one channel, role, or the minimum account age for this server. |
+| `/config clear` | Administrator | Turns off one channel or role feature in this server. Clearing the account age resets it to 3 days. |
 | `/warn` | Moderate Members | Issues a warning and creates an infraction case. |
 | `/timeout` | Moderate Members | Applies a native communication timeout for $N$ minutes. |
 | `/kick` | Kick Members | Kicks a member from the guild. |
 | `/ban` | Ban Members | Bans a member and prunes up to 7 days of messages. |
 | `/purge` | Manage Messages | Deletes up to 100 messages in the channel. |
-| `/infractions` | Moderate Members | Displays past infraction history for a user from SQLite. |
+| `/infractions` | Moderate Members | Displays this server's infraction history for a user. Case numbers start at 1 in each server. |
 
 ---
 
@@ -117,13 +122,15 @@ cargo run --release
 
 ```
 src/
-├── main.rs                   # Framework initialization, intents, slash command router
-├── config.rs                 # Environment configuration loader
-├── util.rs                   # Embed text limits, mod-log posting, error logging
-├── database.rs               # SQLite connection pool and schema migrations
+├── main.rs                   # Framework initialization, intents, per-guild event routing
+├── config.rs                 # Process settings (token, database, optional dev guild)
+├── guild_settings.rs         # Per-server channels, roles, and account-age policy
+├── util.rs                   # Embed limits, mod-log posting, same-server checks
+├── database.rs               # SQLite pool, schema migrations, cases, tickets, temp voice
 └── modules/
-    ├── security/             # Honeypot, account age filters, anti-raid heuristics
-    ├── verification/         # Verification gate, modals, role grants
+    ├── settings.rs           # /config show, set, and clear
+    ├── security/             # Honeypot, account age filters, per-guild anti-raid
+    ├── verification/         # Verification gate, per-server codes, role grants
     ├── moderation/           # AutoMod regex/mention filters, slash commands
     ├── tickets/              # Ticket hub panel, modal builder, transcripts
     └── voice/                # Join-to-create temporary voice channels

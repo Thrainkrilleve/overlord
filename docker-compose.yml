@@ -6,7 +6,8 @@ services:
     env_file:
       - .env
     environment:
-      # Takes precedence over .env so the database always lives in the persistent ./data volume
+      # Takes precedence over .env so the database always lives in the persistent ./data volume.
+      # Schema migrations, including per-server settings, run when the container starts.
       - DATABASE_URL=sqlite:///app/data/overlord.db?mode=rwc
     volumes:
       - ./data:/app/data
