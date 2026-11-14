@@ -1,10 +1,8 @@
+use crate::database::DbPool;
 use regex::Regex;
-use serenity::all::{
-    Context, CreateEmbed, Message, MessageUpdateEvent, Timestamp,
-};
+use serenity::all::{Context, CreateEmbed, Message, MessageUpdateEvent, Timestamp};
 use std::sync::OnceLock;
 use tracing::info;
-use crate::database::DbPool;
 
 static INVITE_REGEX: OnceLock<Regex> = OnceLock::new();
 
@@ -25,13 +23,7 @@ fn find_violation(content: &str, mention_count: usize) -> Option<&'static str> {
     }
 }
 
-pub async fn inspect_message(
-    ctx: &Context,
-    msg: &Message,
-    db: &DbPool,
-    mod_log_channel_id: Option<u64>,
-    mod_role_id: Option<u64>,
-) -> anyhow::Result<bool> {
+pub async fn inspect_message(ctx: &Context, msg: &Message, db: &DbPool) -> anyhow::Result<bool> {
     if msg.author.bot {
         return Ok(false);
     }
@@ -40,13 +32,20 @@ pub async fn inspect_message(
         Some(g) => g,
         None => return Ok(false),
     };
+    let settings = crate::guild_settings::load(db, guild_id.get()).await?;
+    let mod_log_channel_id = settings.mod_log_channel_id;
+    let mod_role_id = settings.mod_role_id;
 
     if crate::util::is_staff_message(ctx, msg, guild_id, mod_role_id) {
         return Ok(false);
     }
 
     if let Some(reason) = find_violation(&msg.content, msg.mentions.len()) {
-        info!("AutoMod caught message from {}: {}", msg.author.tag(), reason);
+        info!(
+            "AutoMod caught message from {}: {}",
+            msg.author.tag(),
+            reason
+        );
 
         // Delete message
         let _ = msg.delete(&ctx.http).await;
@@ -55,7 +54,9 @@ pub async fn inspect_message(
         let until = chrono::Utc::now() + chrono::Duration::minutes(10);
         if let Ok(mut member) = guild_id.member(&ctx.http, msg.author.id).await {
             let timestamp = Timestamp::from_unix_timestamp(until.timestamp()).unwrap();
-            let _ = member.disable_communication_until_datetime(&ctx.http, timestamp).await;
+            let _ = member
+                .disable_communication_until_datetime(&ctx.http, timestamp)
+                .await;
         }
 
         // Record in SQLite
@@ -74,12 +75,20 @@ pub async fn inspect_message(
         let embed = CreateEmbed::new()
             .title("🛡️ AutoMod Filter Triggered")
             .color(0xEF4444)
-            .field("User", format!("{} (`{}`)", msg.author.tag(), msg.author.id.get()), false)
+            .field(
+                "User",
+                format!("{} (`{}`)", msg.author.tag(), msg.author.id.get()),
+                false,
+            )
             .field("Reason", reason, true)
             .field("Penalty", "10-minute Timeout + Message Purged", true)
-            .field("Content", crate::util::embed_field(&msg.content, crate::util::EMBED_FIELD_MAX), false)
+            .field(
+                "Content",
+                crate::util::embed_field(&msg.content, crate::util::EMBED_FIELD_MAX),
+                false,
+            )
             .timestamp(chrono::Utc::now());
-        crate::util::send_mod_log(&ctx.http, mod_log_channel_id, embed).await;
+        crate::util::send_mod_log(ctx, guild_id, mod_log_channel_id, embed).await;
 
         return Ok(true);
     }
@@ -92,8 +101,6 @@ pub async fn inspect_edit(
     ctx: &Context,
     event: &MessageUpdateEvent,
     db: &DbPool,
-    mod_log_channel_id: Option<u64>,
-    mod_role_id: Option<u64>,
 ) -> anyhow::Result<bool> {
     // Link previews and pins also fire updates; only edits by the author set edited_timestamp
     if event.edited_timestamp.is_none() || event.guild_id.is_none() {
@@ -109,7 +116,7 @@ pub async fn inspect_edit(
     msg.guild_id = event.guild_id;
     msg.member = event.member.clone().flatten();
 
-    inspect_message(ctx, &msg, db, mod_log_channel_id, mod_role_id).await
+    inspect_message(ctx, &msg, db).await
 }
 
 #[cfg(test)]
@@ -139,13 +146,20 @@ mod tests {
             "https://discord.com/developers/applications",
             "I love discord",
         ] {
-            assert!(find_violation(text, 0).is_none(), "false positive on {}", text);
+            assert!(
+                find_violation(text, 0).is_none(),
+                "false positive on {}",
+                text
+            );
         }
     }
 
     #[test]
     fn mass_mentions_over_five() {
         assert!(find_violation("hi", 5).is_none());
-        assert_eq!(find_violation("hi", 6), Some("Mass Mention Spam (> 5 users mentioned)"));
+        assert_eq!(
+            find_violation("hi", 6),
+            Some("Mass Mention Spam (> 5 users mentioned)")
+        );
     }
 }

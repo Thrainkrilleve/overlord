@@ -1,8 +1,8 @@
+use serenity::all::CreateEmbed;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use serenity::all::{Context, CreateEmbed};
-use tracing::warn;
 
 const WINDOW: Duration = Duration::from_secs(10);
 const THRESHOLD: usize = 5; // >= 5 joins within 10s triggers raid mode warning
@@ -34,7 +34,7 @@ impl RaidState {
 
 #[derive(Clone, Default)]
 pub struct RaidTracker {
-    state: Arc<Mutex<RaidState>>,
+    guilds: Arc<Mutex<HashMap<u64, RaidState>>>,
 }
 
 impl RaidTracker {
@@ -42,33 +42,26 @@ impl RaidTracker {
         Self::default()
     }
 
-    pub async fn record_join(
-        &self,
-        ctx: &Context,
-        mod_log_channel_id: Option<u64>,
-    ) -> bool {
-        // Decide under the lock, but never hold it across the HTTP call
-        let (count, should_alert) = self.state.lock().await.register(Instant::now());
-
-        if !should_alert {
-            return count >= THRESHOLD;
-        }
-
-        warn!(target: "security::anti_raid", "Potential raid detected! {} joins in {} seconds", count, WINDOW.as_secs());
-
-        let embed = CreateEmbed::new()
-            .title("⚠️ High Join Spike / Potential Raid Detected")
-            .color(0xF59E0B) // Amber
-            .description(format!(
-                "**{} members** joined within the last {} seconds.\nStaff should monitor new joins closely. \
-                Further alerts are suppressed for {} seconds.",
-                count, WINDOW.as_secs(), ALERT_COOLDOWN.as_secs()
-            ))
-            .timestamp(chrono::Utc::now());
-        crate::util::send_mod_log(&ctx.http, mod_log_channel_id, embed).await;
-
-        true
+    /// Record a join in one guild. Returns `(joins_in_window, should_alert)`.
+    /// The window is not shared with any other guild.
+    pub async fn record_join(&self, guild_id: u64) -> (usize, bool) {
+        let mut guilds = self.guilds.lock().await;
+        guilds.entry(guild_id).or_default().register(Instant::now())
     }
+}
+
+pub fn raid_alert_embed(count: usize) -> CreateEmbed {
+    CreateEmbed::new()
+        .title("⚠️ High Join Spike / Potential Raid Detected")
+        .color(0xF59E0B) // Amber
+        .description(format!(
+            "**{} members** joined within the last {} seconds.\nStaff should monitor new joins closely. \
+            Further alerts are suppressed for {} seconds.",
+            count,
+            WINDOW.as_secs(),
+            ALERT_COOLDOWN.as_secs()
+        ))
+        .timestamp(chrono::Utc::now())
 }
 
 #[cfg(test)]
@@ -80,7 +73,10 @@ mod tests {
         let mut state = RaidState::default();
         let t0 = Instant::now();
         for i in 0..4 {
-            assert_eq!(state.register(t0 + Duration::from_secs(i)), ((i + 1) as usize, false));
+            assert_eq!(
+                state.register(t0 + Duration::from_secs(i)),
+                ((i + 1) as usize, false)
+            );
         }
         assert_eq!(state.register(t0 + Duration::from_secs(4)), (5, true));
     }
@@ -103,6 +99,31 @@ mod tests {
             state.register(later + Duration::from_millis(i * 100));
         }
         assert!(state.last_alert.unwrap() >= later);
+    }
+
+    #[tokio::test]
+    async fn guilds_do_not_share_a_join_window() {
+        let tracker = RaidTracker::new();
+        for _ in 0..4 {
+            let (_, alert) = tracker.record_join(1).await;
+            assert!(!alert);
+        }
+        for _ in 0..4 {
+            let (_, alert) = tracker.record_join(2).await;
+            assert!(!alert);
+        }
+
+        let (count, alert) = tracker.record_join(1).await;
+        assert_eq!(count, 5);
+        assert!(alert);
+
+        // Guild 2 is still under the threshold, and guild 1's alert does not cool it down.
+        let (count, alert) = tracker.record_join(2).await;
+        assert_eq!(count, 5);
+        assert!(alert);
+
+        let (count, _) = tracker.record_join(3).await;
+        assert_eq!(count, 1);
     }
 
     #[test]

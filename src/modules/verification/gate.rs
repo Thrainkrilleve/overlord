@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::database::DbPool;
+use crate::guild_settings::GuildSettings;
 use rand::seq::SliceRandom;
 use serenity::all::{
-    ButtonStyle, ComponentInteraction, Context, CreateActionRow, CreateButton,
-    CreateEmbed, CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage,
-    CreateModal, InputTextStyle, ModalInteraction, RoleId, UserId,
+    ButtonStyle, ComponentInteraction, Context, CreateActionRow, CreateButton, CreateEmbed,
+    CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateModal,
+    InputTextStyle, ModalInteraction, UserId,
 };
 use tracing::{error, info};
-use crate::config::Config;
 
 pub const BTN_VERIFY_START: &str = "btn_verify_identity";
 pub const MODAL_VERIFY_SUBMIT: &str = "modal_verify_submit";
@@ -20,30 +21,54 @@ const CODE_TTL: Duration = Duration::from_secs(5 * 60);
 // No 0/O, 1/I/L, so the code is unambiguous to read and type
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
-/// One-time verification codes issued per user. A fresh code is issued on every button click
-/// and consumed by the first modal submission, right or wrong.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct CodeKey {
+    guild_id: u64,
+    user_id: u64,
+}
+
+struct IssuedCode {
+    code: String,
+    issued: Instant,
+}
+
+/// One-time verification codes issued per (guild, user). A fresh code is issued on every button
+/// click and consumed by the first modal submission, right or wrong. A code from one server
+/// cannot be redeemed in another.
 #[derive(Clone, Default)]
 pub struct VerificationCodes {
-    codes: Arc<Mutex<HashMap<UserId, (String, Instant)>>>,
+    codes: Arc<Mutex<HashMap<CodeKey, IssuedCode>>>,
 }
 
 impl VerificationCodes {
-    fn issue(&self, user_id: UserId) -> String {
+    fn issue(&self, guild_id: u64, user_id: UserId) -> String {
         let code = generate_code();
         let now = Instant::now();
         let mut codes = self.codes.lock().unwrap();
         // Drop abandoned codes so the map cannot grow without bound
-        codes.retain(|_, (_, issued)| now.duration_since(*issued) < CODE_TTL);
-        codes.insert(user_id, (code.clone(), now));
+        codes.retain(|_, issued| now.duration_since(issued.issued) < CODE_TTL);
+        codes.insert(
+            CodeKey {
+                guild_id,
+                user_id: user_id.get(),
+            },
+            IssuedCode {
+                code: code.clone(),
+                issued: now,
+            },
+        );
         code
     }
 
-    /// Consume the user's code and report whether `answer` matched it before expiry.
-    fn redeem(&self, user_id: UserId, answer: &str) -> bool {
-        let Some((code, issued)) = self.codes.lock().unwrap().remove(&user_id) else {
+    /// Consume the user's code in this guild and report whether `answer` matched it before expiry.
+    fn redeem(&self, guild_id: u64, user_id: UserId, answer: &str) -> bool {
+        let Some(issued) = self.codes.lock().unwrap().remove(&CodeKey {
+            guild_id,
+            user_id: user_id.get(),
+        }) else {
             return false;
         };
-        issued.elapsed() < CODE_TTL && answer.trim().eq_ignore_ascii_case(&code)
+        issued.issued.elapsed() < CODE_TTL && answer.trim().eq_ignore_ascii_case(&issued.code)
     }
 }
 
@@ -62,9 +87,11 @@ pub fn build_verification_panel() -> (CreateEmbed, CreateActionRow) {
         .description(
             "Welcome! To prevent automated spam accounts and protect the community, \
             please complete a quick verification check.\n\n\
-            Click the button below and type the code you are shown to gain access to the server."
+            Click the button below and type the code you are shown to gain access to the server.",
         )
-        .footer(serenity::all::CreateEmbedFooter::new("Protected by Overlord Security"));
+        .footer(serenity::all::CreateEmbedFooter::new(
+            "Protected by Overlord Security",
+        ));
 
     let button = CreateButton::new(BTN_VERIFY_START)
         .label("Verify Identity")
@@ -82,7 +109,16 @@ pub async fn handle_verify_button(
     interaction: &ComponentInteraction,
     codes: &VerificationCodes,
 ) -> anyhow::Result<()> {
-    let code = codes.issue(interaction.user.id);
+    let Some(guild_id) = interaction.guild_id else {
+        let msg = CreateInteractionResponseMessage::new()
+            .content("Verification only works inside a server.")
+            .ephemeral(true);
+        interaction
+            .create_response(&ctx.http, CreateInteractionResponse::Message(msg))
+            .await?;
+        return Ok(());
+    };
+    let code = codes.issue(guild_id.get(), interaction.user.id);
 
     let input = CreateInputText::new(
         InputTextStyle::Short,
@@ -102,11 +138,17 @@ pub async fn handle_verify_button(
     Ok(())
 }
 
+enum GrantOutcome {
+    Granted,
+    NotConfigured,
+    Failed,
+}
+
 /// Handles modal submission from the user
 pub async fn handle_verify_modal_submit(
     ctx: &Context,
     interaction: &ModalInteraction,
-    config: &Config,
+    db: &DbPool,
     codes: &VerificationCodes,
 ) -> anyhow::Result<()> {
     let mut user_input = String::new();
@@ -123,65 +165,99 @@ pub async fn handle_verify_modal_submit(
         }
     }
 
-    let guild_id = match interaction.guild_id {
-        Some(g) => g,
-        None => return Ok(()),
+    let Some(guild_id) = interaction.guild_id else {
+        let msg = CreateInteractionResponseMessage::new()
+            .content("Verification only works inside a server.")
+            .ephemeral(true);
+        interaction
+            .create_response(&ctx.http, CreateInteractionResponse::Message(msg))
+            .await?;
+        return Ok(());
     };
 
     let user_id = interaction.user.id;
+    let settings = crate::guild_settings::load(db, guild_id.get()).await?;
 
-    let (title, description, color) = if !codes.redeem(user_id, &user_input) {
+    let (title, description, color) = if !codes.redeem(guild_id.get(), user_id, &user_input) {
         (
             "❌ Verification Failed",
             "That code was wrong or has expired. Click the button again to get a new code.",
             0xEF4444,
         )
-    } else if grant_member_roles(ctx, guild_id, user_id, config).await {
-        info!("User {} successfully verified", user_id);
-        (
-            "✅ Verification Successful",
-            "Welcome aboard! Your roles have been assigned and server channels are now unlocked.",
-            0x10B981,
-        )
     } else {
-        (
-            "⚠️ Verification Incomplete",
-            "Your code was correct, but your role could not be assigned. Please contact a staff member.",
-            0xF59E0B,
-        )
+        match grant_member_roles(ctx, guild_id, user_id, &settings).await {
+            GrantOutcome::Granted => {
+                info!("User {} successfully verified in guild {}", user_id, guild_id);
+                (
+                    "✅ Verification Successful",
+                    "Welcome aboard! Your roles have been assigned and server channels are now unlocked.",
+                    0x10B981,
+                )
+            }
+            GrantOutcome::NotConfigured => (
+                "⚠️ Verification Incomplete",
+                "Your code was correct, but this server has not set a member role. Ask an admin to run `/config set`.",
+                0xF59E0B,
+            ),
+            GrantOutcome::Failed => (
+                "⚠️ Verification Incomplete",
+                "Your code was correct, but your role could not be assigned. The bot's role may need to be moved higher. Please contact a staff member.",
+                0xF59E0B,
+            ),
+        }
     };
 
-    let embed = CreateEmbed::new().title(title).description(description).color(color);
-    let msg = CreateInteractionResponseMessage::new().embed(embed).ephemeral(true);
-    interaction.create_response(&ctx.http, CreateInteractionResponse::Message(msg)).await?;
+    let embed = CreateEmbed::new()
+        .title(title)
+        .description(description)
+        .color(color);
+    let msg = CreateInteractionResponseMessage::new()
+        .embed(embed)
+        .ephemeral(true);
+    interaction
+        .create_response(&ctx.http, CreateInteractionResponse::Message(msg))
+        .await?;
 
     Ok(())
 }
 
-/// Grant the member role and drop the unverified role. Returns false if the member role
-/// could not be granted (the usual cause is the bot's role sitting below the member role).
+/// Grant the member role and drop the unverified role. Both roles must belong to this guild.
+/// `NotConfigured` means this server has no usable member role, so no roles are changed.
 async fn grant_member_roles(
     ctx: &Context,
     guild_id: serenity::all::GuildId,
     user_id: UserId,
-    config: &Config,
-) -> bool {
+    settings: &GuildSettings,
+) -> GrantOutcome {
     let reason = Some("Passed Overlord Verification");
 
-    if let Some(member_role) = config.member_role_id {
-        if let Err(e) = ctx.http.add_member_role(guild_id, user_id, RoleId::new(member_role), reason).await {
-            error!("Failed to grant member role to {}: {}", user_id, e);
-            return false;
-        }
+    let Some(member_role) =
+        crate::util::role_in_guild(ctx, guild_id, settings.member_role_id).await
+    else {
+        return GrantOutcome::NotConfigured;
+    };
+    if let Err(e) = ctx
+        .http
+        .add_member_role(guild_id, user_id, member_role, reason)
+        .await
+    {
+        error!("Failed to grant member role to {}: {}", user_id, e);
+        return GrantOutcome::Failed;
     }
 
-    if let Some(unverified_role) = config.unverified_role_id {
-        if let Err(e) = ctx.http.remove_member_role(guild_id, user_id, RoleId::new(unverified_role), reason).await {
+    if let Some(unverified_role) =
+        crate::util::role_in_guild(ctx, guild_id, settings.unverified_role_id).await
+    {
+        if let Err(e) = ctx
+            .http
+            .remove_member_role(guild_id, user_id, unverified_role, reason)
+            .await
+        {
             error!("Failed to remove unverified role from {}: {}", user_id, e);
         }
     }
 
-    true
+    GrantOutcome::Granted
 }
 
 #[cfg(test)]
@@ -193,7 +269,11 @@ mod tests {
         for _ in 0..100 {
             let code = generate_code();
             assert_eq!(code.len(), CODE_LEN);
-            assert!(code.bytes().all(|b| CODE_ALPHABET.contains(&b)), "bad code {}", code);
+            assert!(
+                code.bytes().all(|b| CODE_ALPHABET.contains(&b)),
+                "bad code {}",
+                code
+            );
         }
     }
 
@@ -201,35 +281,47 @@ mod tests {
     fn correct_code_verifies_case_insensitively() {
         let codes = VerificationCodes::default();
         let user = UserId::new(1);
-        let code = codes.issue(user);
-        assert!(codes.redeem(user, &format!("  {}  ", code.to_lowercase())));
+        let code = codes.issue(1, user);
+        assert!(codes.redeem(1, user, &format!("  {}  ", code.to_lowercase())));
     }
 
     #[test]
     fn code_is_single_use() {
         let codes = VerificationCodes::default();
         let user = UserId::new(1);
-        let code = codes.issue(user);
-        assert!(codes.redeem(user, &code));
-        assert!(!codes.redeem(user, &code));
+        let code = codes.issue(1, user);
+        assert!(codes.redeem(1, user, &code));
+        assert!(!codes.redeem(1, user, &code));
     }
 
     #[test]
     fn wrong_answer_consumes_the_code() {
         let codes = VerificationCodes::default();
         let user = UserId::new(1);
-        let code = codes.issue(user);
-        assert!(!codes.redeem(user, "WRONG1"));
-        assert!(!codes.redeem(user, &code));
+        let code = codes.issue(1, user);
+        assert!(!codes.redeem(1, user, "WRONG1"));
+        assert!(!codes.redeem(1, user, &code));
     }
 
     #[test]
     fn codes_are_per_user() {
         // Another user cannot redeem a code that was issued to someone else
         let codes = VerificationCodes::default();
-        let code_a = codes.issue(UserId::new(1));
-        assert!(!codes.redeem(UserId::new(2), &code_a));
-        assert!(codes.redeem(UserId::new(1), &code_a));
+        let code_a = codes.issue(1, UserId::new(1));
+        assert!(!codes.redeem(1, UserId::new(2), &code_a));
+        assert!(codes.redeem(1, UserId::new(1), &code_a));
+    }
+
+    #[test]
+    fn codes_are_per_guild() {
+        let codes = VerificationCodes::default();
+        let user = UserId::new(1);
+        let code = codes.issue(10, user);
+        assert!(!codes.redeem(20, user, &code));
+        assert!(codes.redeem(10, user, &code));
+        // Redeeming in one server does not consume the other server's code.
+        let other = codes.issue(20, user);
+        assert!(codes.redeem(20, user, &other));
     }
 
     #[test]
@@ -237,7 +329,7 @@ mod tests {
         let codes = VerificationCodes::default();
         let user = UserId::new(1);
         // "VERIFY" can never be a code: the alphabet has no letter I
-        codes.issue(user);
-        assert!(!codes.redeem(user, "VERIFY"));
+        codes.issue(1, user);
+        assert!(!codes.redeem(1, user, "VERIFY"));
     }
 }

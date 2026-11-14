@@ -1,12 +1,13 @@
+use crate::database::DbPool;
+use crate::guild_settings::GuildSettings;
+use crate::modules::tickets::transcript;
 use serenity::all::{
     ButtonStyle, ChannelId, ChannelType, ComponentInteraction, Context, CreateActionRow,
     CreateButton, CreateChannel, CreateEmbed, CreateInputText, CreateInteractionResponse,
     CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage,
-    CreateModal, InputTextStyle, ModalInteraction, PermissionOverwrite, PermissionOverwriteType, Permissions, RoleId,
+    CreateModal, InputTextStyle, ModalInteraction, PermissionOverwrite, PermissionOverwriteType,
+    Permissions, RoleId,
 };
-use crate::config::Config;
-use crate::database::DbPool;
-use crate::modules::tickets::transcript;
 
 pub const TICKET_BTN_GENERAL: &str = "ticket_btn_general";
 pub const TICKET_BTN_REPORT: &str = "ticket_btn_report";
@@ -28,9 +29,11 @@ pub fn build_ticket_panel() -> (CreateEmbed, CreateActionRow) {
             "Need assistance from our team? Select an option below to open a private ticket.\n\n\
             • **General Support**: Questions, assistance, feedback\n\
             • **Report User / Scam**: Exploiters, suspicious activity, malicious links\n\
-            • **Role / VIP Inquiries**: Role rewards, access issues, inquiries"
+            • **Role / VIP Inquiries**: Role rewards, access issues, inquiries",
         )
-        .footer(serenity::all::CreateEmbedFooter::new("Overlord Support System"));
+        .footer(serenity::all::CreateEmbedFooter::new(
+            "Overlord Support System",
+        ));
 
     let b_general = CreateButton::new(TICKET_BTN_GENERAL)
         .label("General Support")
@@ -51,15 +54,17 @@ pub fn build_ticket_panel() -> (CreateEmbed, CreateActionRow) {
     (embed, row)
 }
 
-/// Whether the clicking member may claim/close tickets: holds the mod role or can manage channels.
-fn is_staff(interaction: &ComponentInteraction, config: &Config) -> bool {
-    let Some(member) = &interaction.member else { return false };
-    let has_mod_role = config
+/// Whether the clicking member may claim/close tickets: holds this server's mod role or can manage channels.
+fn is_staff(interaction: &ComponentInteraction, settings: &GuildSettings) -> bool {
+    let Some(member) = &interaction.member else {
+        return false;
+    };
+    let has_mod_role = settings
         .mod_role_id
         .is_some_and(|id| member.roles.contains(&RoleId::new(id)));
-    let can_manage = member
-        .permissions
-        .is_some_and(|p| p.contains(Permissions::MANAGE_CHANNELS) || p.contains(Permissions::ADMINISTRATOR));
+    let can_manage = member.permissions.is_some_and(|p| {
+        p.contains(Permissions::MANAGE_CHANNELS) || p.contains(Permissions::ADMINISTRATOR)
+    });
     has_mod_role || can_manage
 }
 
@@ -67,7 +72,9 @@ async fn reject_non_staff(ctx: &Context, interaction: &ComponentInteraction) -> 
     let msg = CreateInteractionResponseMessage::new()
         .content("⛔ Only support staff can use this control.")
         .ephemeral(true);
-    interaction.create_response(&ctx.http, CreateInteractionResponse::Message(msg)).await?;
+    interaction
+        .create_response(&ctx.http, CreateInteractionResponse::Message(msg))
+        .await?;
     Ok(())
 }
 
@@ -95,13 +102,18 @@ pub async fn handle_ticket_open_click(
     .required(true)
     .max_length(1000);
 
-    let modal = CreateModal::new(format!("{}:{}", TICKET_MODAL_CREATE, category), format!("New Ticket: {}", category))
-        .components(vec![
-            CreateActionRow::InputText(subject_input),
-            CreateActionRow::InputText(details_input),
-        ]);
+    let modal = CreateModal::new(
+        format!("{}:{}", TICKET_MODAL_CREATE, category),
+        format!("New Ticket: {}", category),
+    )
+    .components(vec![
+        CreateActionRow::InputText(subject_input),
+        CreateActionRow::InputText(details_input),
+    ]);
 
-    interaction.create_response(&ctx.http, CreateInteractionResponse::Modal(modal)).await?;
+    interaction
+        .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+        .await?;
     Ok(())
 }
 
@@ -109,24 +121,33 @@ pub async fn handle_ticket_open_click(
 pub async fn handle_ticket_modal_submit(
     ctx: &Context,
     interaction: &ModalInteraction,
-    config: &Config,
     db: &DbPool,
     category: &str,
 ) -> anyhow::Result<()> {
-    let guild_id = match interaction.guild_id {
-        Some(g) => g,
-        None => return Ok(()),
+    let Some(guild_id) = interaction.guild_id else {
+        let reply = CreateInteractionResponseMessage::new()
+            .content("Tickets only work inside a server.")
+            .ephemeral(true);
+        interaction
+            .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+            .await?;
+        return Ok(());
     };
+    let settings = crate::guild_settings::load(db, guild_id.get()).await?;
 
     let user = &interaction.user;
 
     // One open ticket per user. If the recorded channel was deleted by hand, release it.
-    if let Some(existing) = crate::database::find_open_ticket(db, user.id.get(), guild_id.get()).await? {
+    if let Some(existing) =
+        crate::database::find_open_ticket(db, user.id.get(), guild_id.get()).await?
+    {
         if ctx.http.get_channel(ChannelId::new(existing)).await.is_ok() {
             let reply = CreateInteractionResponseMessage::new()
                 .content(format!("You already have an open ticket: <#{}>", existing))
                 .ephemeral(true);
-            interaction.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await?;
+            interaction
+                .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+                .await?;
             return Ok(());
         }
         crate::database::close_ticket(db, existing).await?;
@@ -158,17 +179,24 @@ pub async fn handle_ticket_modal_submit(
             kind: PermissionOverwriteType::Role(RoleId::new(guild_id.get())), // @everyone role ID is the guild ID
         },
         PermissionOverwrite {
-            allow: Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES | Permissions::READ_MESSAGE_HISTORY | Permissions::ATTACH_FILES,
+            allow: Permissions::VIEW_CHANNEL
+                | Permissions::SEND_MESSAGES
+                | Permissions::READ_MESSAGE_HISTORY
+                | Permissions::ATTACH_FILES,
             deny: Permissions::empty(),
             kind: PermissionOverwriteType::Member(user.id),
         },
     ];
 
-    if let Some(mod_role) = config.mod_role_id {
+    let staff_role = crate::util::role_in_guild(ctx, guild_id, settings.mod_role_id).await;
+    if let Some(mod_role) = staff_role {
         overwrites.push(PermissionOverwrite {
-            allow: Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES | Permissions::READ_MESSAGE_HISTORY | Permissions::ATTACH_FILES,
+            allow: Permissions::VIEW_CHANNEL
+                | Permissions::SEND_MESSAGES
+                | Permissions::READ_MESSAGE_HISTORY
+                | Permissions::ATTACH_FILES,
             deny: Permissions::empty(),
-            kind: PermissionOverwriteType::Role(RoleId::new(mod_role)),
+            kind: PermissionOverwriteType::Role(mod_role),
         });
     }
 
@@ -177,8 +205,12 @@ pub async fn handle_ticket_modal_submit(
         .kind(ChannelType::Text)
         .permissions(overwrites);
 
-    if let Some(cat_id) = config.ticket_category_id {
-        builder = builder.category(ChannelId::new(cat_id));
+    // A category from another server is omitted. Discord would reject the create, and the
+    // channel must stay in this guild.
+    if let Some(cat_id) =
+        crate::util::channel_in_guild(ctx, guild_id, settings.ticket_category_id).await
+    {
+        builder = builder.category(cat_id);
     }
 
     let ticket_channel = guild_id.create_channel(&ctx.http, builder).await?;
@@ -201,8 +233,33 @@ pub async fn handle_ticket_modal_submit(
         .field("Category", category, true)
         .field("Subject", subject, false)
         .field("Details", details, false)
-        .description("Support staff will be with you shortly. Use the controls below to manage this ticket.")
+        .description(
+            "Support staff will be with you shortly. Use the controls below to manage this ticket.",
+        )
         .timestamp(chrono::Utc::now());
+
+    let mut notes = Vec::new();
+    if settings.mod_role_id.is_none() {
+        notes.push("No staff role is set, so only members who can manage channels will see this ticket. An admin can set it with `/config set`.");
+    } else if staff_role.is_none() {
+        notes.push("The staff role saved for this server is not a role here, so staff may not see this ticket. An admin can set it again with `/config set`.");
+    }
+    if settings.transcript_channel_id.is_none() {
+        notes.push("No transcript channel is set. This ticket cannot be closed until an admin runs `/config set`.");
+    } else if crate::util::channel_in_guild(ctx, guild_id, settings.transcript_channel_id)
+        .await
+        .is_none()
+    {
+        notes.push("The transcript channel saved for this server cannot be used. An admin can set it again with `/config set`.");
+    }
+    if settings.ticket_category_id.is_none() {
+        notes.push("No ticket category is set, so this channel was created outside a category.");
+    }
+    let embed = if notes.is_empty() {
+        embed
+    } else {
+        embed.field("Setup", notes.join("\n"), false)
+    };
 
     let b_claim = CreateButton::new(TICKET_BTN_CLAIM)
         .label("Claim Ticket")
@@ -215,14 +272,22 @@ pub async fn handle_ticket_modal_submit(
         .emoji('🔒');
 
     let controls = CreateActionRow::Buttons(vec![b_claim, b_close]);
-    let initial_msg = CreateMessage::new().content(format!("<@{}> Welcome!", user.id)).embed(embed).components(vec![controls]);
+    let initial_msg = CreateMessage::new()
+        .content(format!("<@{}> Welcome!", user.id))
+        .embed(embed)
+        .components(vec![controls]);
     ticket_channel.send_message(&ctx.http, initial_msg).await?;
 
     // Respond to user
     let reply = CreateInteractionResponseMessage::new()
-        .content(format!("✅ Ticket created! Head over to <#{}>.", ticket_channel.id.get()))
+        .content(format!(
+            "✅ Ticket created! Head over to <#{}>.",
+            ticket_channel.id.get()
+        ))
         .ephemeral(true);
-    interaction.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await?;
+    interaction
+        .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+        .await?;
 
     Ok(())
 }
@@ -231,23 +296,34 @@ pub async fn handle_ticket_modal_submit(
 pub async fn handle_ticket_claim(
     ctx: &Context,
     interaction: &ComponentInteraction,
-    config: &Config,
     db: &DbPool,
 ) -> anyhow::Result<()> {
-    if !is_staff(interaction, config) {
+    let Some(guild_id) = interaction.guild_id else {
+        return reject_non_staff(ctx, interaction).await;
+    };
+    let settings = crate::guild_settings::load(db, guild_id.get()).await?;
+    if !is_staff(interaction, &settings) {
         return reject_non_staff(ctx, interaction).await;
     }
 
-    crate::database::claim_ticket(db, interaction.channel_id.get(), interaction.user.id.get()).await?;
+    crate::database::claim_ticket(db, interaction.channel_id.get(), interaction.user.id.get())
+        .await?;
 
     let embed = CreateEmbed::new()
-        .description(format!("🙋 Ticket has been claimed by <@{}>.", interaction.user.id.get()))
+        .description(format!(
+            "🙋 Ticket has been claimed by <@{}>.",
+            interaction.user.id.get()
+        ))
         .color(0x10B981);
 
-    interaction.create_response(
-        &ctx.http,
-        CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().embed(embed)),
-    ).await?;
+    interaction
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new().embed(embed),
+            ),
+        )
+        .await?;
 
     Ok(())
 }
@@ -256,10 +332,13 @@ pub async fn handle_ticket_claim(
 pub async fn handle_ticket_close(
     ctx: &Context,
     interaction: &ComponentInteraction,
-    config: &Config,
     db: &DbPool,
 ) -> anyhow::Result<()> {
-    if !is_staff(interaction, config) {
+    let Some(guild_id) = interaction.guild_id else {
+        return reject_non_staff(ctx, interaction).await;
+    };
+    let settings = crate::guild_settings::load(db, guild_id.get()).await?;
+    if !is_staff(interaction, &settings) {
         return reject_non_staff(ctx, interaction).await;
     }
 
@@ -267,18 +346,26 @@ pub async fn handle_ticket_close(
     let resp = CreateInteractionResponseMessage::new()
         .content("🔒 Ticket closing. Archiving transcript...")
         .ephemeral(true);
-    let _ = interaction.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await;
+    let _ = interaction
+        .create_response(&ctx.http, CreateInteractionResponse::Message(resp))
+        .await;
 
     // 2. Generate and upload transcript. Never delete the channel unless it was archived.
     if let Err(e) = transcript::generate_and_archive_transcript(
         ctx,
         db,
+        guild_id,
         interaction.channel_id,
-        config.transcript_channel_id,
+        settings.transcript_channel_id,
         &interaction.user,
-    ).await {
+    )
+    .await
+    {
         let followup = CreateInteractionResponseFollowup::new()
-            .content(format!("⚠️ Transcript could not be archived ({}). The ticket was left open.", e))
+            .content(format!(
+                "⚠️ Transcript could not be archived ({}). The ticket was left open.",
+                e
+            ))
             .ephemeral(true);
         interaction.create_followup(&ctx.http, followup).await?;
         return Ok(());

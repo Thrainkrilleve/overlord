@@ -1,9 +1,14 @@
+use crate::database::DbPool;
 use serenity::all::{
-    ChannelId, Context, CreateAttachment, CreateEmbed, CreateMessage, GetMessages, MessageId, User,
-    UserId,
+    ChannelId, Context, CreateAttachment, CreateEmbed, CreateMessage, GetMessages, GuildId,
+    MessageId, User, UserId,
 };
 use tracing::info;
-use crate::database::DbPool;
+
+/// A stored ticket may only be archived for the server that owns it.
+fn transcript_guild_ok(stored_guild_id: i64, actual_guild_id: u64) -> bool {
+    stored_guild_id >= 0 && stored_guild_id as u64 == actual_guild_id
+}
 
 /// Convert SQLite's `datetime('now')` text (UTC) into a Discord timestamp tag, which each viewer's
 /// client renders in their own time zone.
@@ -23,12 +28,40 @@ async fn user_label(ctx: &Context, id: u64) -> String {
 pub async fn generate_and_archive_transcript(
     ctx: &Context,
     db: &DbPool,
+    guild_id: GuildId,
     channel_id: ChannelId,
     transcript_channel_id: Option<u64>,
     closer: &User,
 ) -> anyhow::Result<()> {
-    let log_id = transcript_channel_id
-        .ok_or_else(|| anyhow::anyhow!("TRANSCRIPT_CHANNEL_ID is not configured"))?;
+    let log_id = match crate::util::channel_in_guild(ctx, guild_id, transcript_channel_id).await {
+        Some(id) => id,
+        None if transcript_channel_id.is_none() => {
+            return Err(anyhow::anyhow!(
+                "no transcript channel is set for this server. An admin can set one with `/config set`, then close the ticket again"
+            ));
+        }
+        None => {
+            return Err(anyhow::anyhow!(
+                "the transcript channel saved for this server is not a channel here, or the bot cannot see it. An admin can set it again with `/config set`"
+            ));
+        }
+    };
+
+    let ticket = crate::database::get_ticket(db, channel_id.get()).await?;
+    if let Some(ticket) = &ticket {
+        if !transcript_guild_ok(ticket.guild_id, guild_id.get()) {
+            tracing::warn!(
+                "Refusing to archive ticket {} for channel {}: it belongs to guild {}, not {}",
+                ticket.id,
+                channel_id,
+                ticket.guild_id,
+                guild_id
+            );
+            return Err(anyhow::anyhow!(
+                "this ticket belongs to a different server, so it was not archived"
+            ));
+        }
+    }
 
     // 1. Fetch every channel message, 100 at a time (newest first)
     let mut messages = Vec::new();
@@ -48,8 +81,7 @@ pub async fn generate_and_archive_transcript(
     }
     messages.reverse(); // Chronological order
 
-    // Ticket details: the DB row, plus the subject from the bot's opening embed (not stored in the DB)
-    let ticket = crate::database::get_ticket(db, channel_id.get()).await?;
+    // Subject comes from the bot's opening embed; it is not stored in the database.
     let subject = messages
         .iter()
         .filter(|m| m.author.bot)
@@ -59,10 +91,15 @@ pub async fn generate_and_archive_transcript(
         .map(|f| f.value.clone())
         .unwrap_or_default();
 
-    let ticket_label = ticket.as_ref().map_or_else(|| "Unknown".to_string(), |t| format!("#{}", t.id));
+    let ticket_label = ticket
+        .as_ref()
+        .map_or_else(|| "Unknown".to_string(), |t| format!("#{}", t.id));
     let category = ticket.as_ref().map_or("Unknown", |t| t.category.as_str());
     let opened_by_id = ticket.as_ref().map(|t| t.user_id as u64);
-    let claimed_by_id = ticket.as_ref().and_then(|t| t.claimed_by).map(|id| id as u64);
+    let claimed_by_id = ticket
+        .as_ref()
+        .and_then(|t| t.claimed_by)
+        .map(|id| id as u64);
     let opened_at = ticket.as_ref().map_or("Unknown", |t| t.created_at.as_str());
 
     let opened_by_label = match opened_by_id {
@@ -92,7 +129,11 @@ pub async fn generate_and_archive_transcript(
          =====================================================\n\n",
         ticket_label,
         category,
-        if subject.is_empty() { "Unknown" } else { subject.as_str() },
+        if subject.is_empty() {
+            "Unknown"
+        } else {
+            subject.as_str()
+        },
         opened_by_label,
         opened_at,
         claimed_by_label,
@@ -139,7 +180,9 @@ pub async fn generate_and_archive_transcript(
     };
     let attachment = CreateAttachment::bytes(transcript_text.as_bytes().to_vec(), &filename);
 
-    let mention = |id: Option<u64>, fallback: &str| id.map_or_else(|| fallback.to_string(), |id| format!("<@{}>", id));
+    let mention = |id: Option<u64>, fallback: &str| {
+        id.map_or_else(|| fallback.to_string(), |id| format!("<@{}>", id))
+    };
     let embed = CreateEmbed::new()
         .title(format!("📋 Ticket {} Closed & Archived", ticket_label))
         .color(0x3B82F6)
@@ -157,7 +200,7 @@ pub async fn generate_and_archive_transcript(
         .timestamp(chrono::Utc::now());
 
     let msg_builder = CreateMessage::new().embed(embed).add_file(attachment);
-    ChannelId::new(log_id).send_message(&ctx.http, msg_builder).await?;
+    log_id.send_message(&ctx.http, msg_builder).await?;
     info!("Transcript archived for channel {}", channel_id.get());
 
     Ok(())
@@ -170,11 +213,21 @@ mod tests {
     #[test]
     fn sqlite_utc_becomes_discord_timestamp() {
         // 2026-11-02 04:01:05 UTC
-        assert_eq!(discord_timestamp("2026-11-02 04:01:05").as_deref(), Some("<t:1793592065:f>"));
+        assert_eq!(
+            discord_timestamp("2026-11-02 04:01:05").as_deref(),
+            Some("<t:1793592065:f>")
+        );
     }
 
     #[test]
     fn unparseable_time_is_none() {
         assert_eq!(discord_timestamp("Unknown"), None);
+    }
+
+    #[test]
+    fn transcript_refuses_a_different_guild() {
+        assert!(transcript_guild_ok(10, 10));
+        assert!(!transcript_guild_ok(10, 11));
+        assert!(!transcript_guild_ok(-1, 1));
     }
 }
