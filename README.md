@@ -94,7 +94,7 @@ Case numbers start at 1 in each server. `/infractions` only lists cases from the
 
 The dashboard is optional and served by the same process, on the same SQLite file. A save is live: the next join, message, or ticket uses the new value.
 
-Turn it on with `DASHBOARD_ENABLED=true` and the `DASHBOARD_*` values in `.env.example`. Sign in with **Continue with Discord** (OAuth2 authorization code, PKCE, HttpOnly cookies). You only see servers where you have **Manage Server** or **Administrator** and the bot is present. Every write checks that permission again with Discord, rejects a channel or role that is not in that server, and appends a row to the audit log (who, which setting, old value, new value, when).
+Turn it on with `DASHBOARD_ENABLED=true` and the `DASHBOARD_*` values in `.env.example`. Sign in with **Continue with Discord** (OAuth2 authorization code, PKCE, HttpOnly `SameSite=Lax` cookies). The server list is only communities where you have **Manage Server** or **Administrator**. If Overlord is already in that server, open its dashboard and edit that server's settings. If not, the card opens `/install?guild_id=...`. The separate **Add Overlord to a server** card is `/install` with no server pre-selected. Every save checks the permission again with Discord, rejects a channel or role that is not in that server, and appends a row to the audit log (who, which setting, old value, new value, when).
 
 `GET /install` is public. It answers **302** with Discord's bot invite (`bot` and `applications.commands`, permissions from `DASHBOARD_INVITE_PERMISSIONS`). Use it as the application's **Custom Install URL**. The "Add Overlord to a server" card calls `/install?guild_id=...` so the same route can pre-select a server.
 

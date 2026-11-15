@@ -1063,7 +1063,13 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    struct Fake;
+    #[derive(Default)]
+    struct Fake {
+        guilds: Vec<UserGuild>,
+        channels: Vec<super::super::api::ChannelChoice>,
+        roles: Vec<super::super::api::RoleChoice>,
+        bot_guilds: Vec<u64>,
+    }
 
     #[async_trait::async_trait]
     impl DiscordApi for Fake {
@@ -1078,19 +1084,19 @@ mod tests {
             Err(ApiError::Unavailable)
         }
         async fn user_guilds(&self, _: &str) -> Result<Vec<UserGuild>, ApiError> {
-            Ok(Vec::new())
+            Ok(self.guilds.clone())
         }
         async fn bot_guild_ids(&self) -> Result<Vec<u64>, ApiError> {
-            Ok(Vec::new())
+            Ok(self.bot_guilds.clone())
         }
         async fn channels(
             &self,
             _: u64,
         ) -> Result<Vec<super::super::api::ChannelChoice>, ApiError> {
-            Ok(Vec::new())
+            Ok(self.channels.clone())
         }
         async fn roles(&self, _: u64) -> Result<Vec<super::super::api::RoleChoice>, ApiError> {
-            Ok(Vec::new())
+            Ok(self.roles.clone())
         }
         async fn display_name(&self, user_id: u64) -> Result<String, ApiError> {
             Ok(user_id.to_string())
@@ -1115,7 +1121,7 @@ mod tests {
         let state = AppState {
             db: crate::database::test_pool("install-route").await,
             cfg,
-            discord: Arc::new(Fake),
+            discord: Arc::new(Fake::default()),
             limiter: Arc::new(RateLimiter::default()),
         };
         let response = router(state.clone())
@@ -1157,5 +1163,150 @@ mod tests {
             .unwrap();
         assert!(location.contains("guild_id=42"));
         assert!(location.contains("disable_guild_select=true"));
+    }
+
+    fn dashboard_cfg() -> crate::config::DashboardConfig {
+        crate::config::dashboard_from_parts(
+            true,
+            Some("127.0.0.1:8080"),
+            Some("https://overlord.example.com"),
+            Some("123456789012345678"),
+            Some("placeholder-secret"),
+            None,
+            None,
+            false,
+            Some("1099798014998"),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    async fn session(db: &crate::database::DbPool) -> store::Session {
+        let now = chrono::Utc::now().timestamp();
+        let session = store::Session {
+            id: "session-test".into(),
+            user_id: 9,
+            username: "maple_admin".into(),
+            avatar: None,
+            access_token: "user-token".into(),
+            refresh_token: None,
+            token_expires_at: now + 3600,
+            csrf_token: "csrf-token".into(),
+            expires_at: now + 3600,
+        };
+        store::create_session(db, &session).await.unwrap();
+        session
+    }
+
+    fn security_body(csrf: &str, channel: &str) -> String {
+        format!(
+            "csrf={csrf}&min_account_age_days=4&raid_join_threshold=5&raid_window_seconds=10&raid_action=alert&unverified_role_id=&mod_log_channel_id={channel}&honeypot_channel_id="
+        )
+    }
+
+    #[tokio::test]
+    async fn writes_require_a_session_manage_server_and_are_audited() {
+        let db = crate::database::test_pool("dash-auth").await;
+        let session = session(&db).await;
+        let channel = super::super::api::ChannelChoice {
+            id: 555,
+            name: "mod-logs".into(),
+            kind: super::super::api::ChannelKind::Text,
+        };
+        let allowed = Fake {
+            guilds: vec![UserGuild {
+                id: 10,
+                name: "Pixel Forge".into(),
+                icon: None,
+                owner: false,
+                permissions: guard::MANAGE_GUILD,
+            }],
+            channels: vec![channel],
+            roles: Vec::new(),
+            bot_guilds: vec![10],
+        };
+        let denied = Fake {
+            guilds: vec![UserGuild {
+                id: 10,
+                name: "Pixel Forge".into(),
+                icon: None,
+                owner: false,
+                permissions: 0,
+            }],
+            channels: allowed.channels.clone(),
+            roles: Vec::new(),
+            bot_guilds: vec![10],
+        };
+
+        let anonymous = router(AppState {
+            db: db.clone(),
+            cfg: dashboard_cfg(),
+            discord: Arc::new(Fake::default()),
+            limiter: Arc::new(RateLimiter::default()),
+        });
+        let response = anonymous
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/servers/10/security")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(security_body("csrf-token", "555")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap().to_str().unwrap(),
+            "/"
+        );
+
+        let forbidden = router(AppState {
+            db: db.clone(),
+            cfg: dashboard_cfg(),
+            discord: Arc::new(denied),
+            limiter: Arc::new(RateLimiter::default()),
+        });
+        let response = forbidden
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/servers/10/security")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("overlord_session={}", session.id))
+                    .body(Body::from(security_body("csrf-token", "555")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(crate::audit::list(&db, 10, 14, 20).await.unwrap().is_empty());
+
+        let allowed_app = router(AppState {
+            db: db.clone(),
+            cfg: dashboard_cfg(),
+            discord: Arc::new(allowed),
+            limiter: Arc::new(RateLimiter::default()),
+        });
+        let response = allowed_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/servers/10/security")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("overlord_session={}", session.id))
+                    .body(Body::from(security_body("csrf-token", "555")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let settings = crate::guild_settings::load(&db, 10).await.unwrap();
+        assert_eq!(settings.mod_log_channel_id, Some(555));
+        assert_eq!(settings.min_account_age_days, 4);
+        let rows = crate::audit::list(&db, 10, 14, 20).await.unwrap();
+        assert!(rows.iter().any(|row| row.field == "Mod log channel" && row.new_value == "#mod-logs"));
+        assert!(rows.iter().all(|row| row.username == "maple_admin"));
+        assert!(crate::audit::list(&db, 11, 14, 20).await.unwrap().is_empty());
     }
 }

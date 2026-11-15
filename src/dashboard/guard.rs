@@ -146,6 +146,16 @@ mod tests {
     }
 
     #[test]
+    fn session_cookie_is_httponly_lax_and_optionally_secure() {
+        let secure = set_cookie("overlord_session", "abc", 60, true);
+        assert!(secure.contains("HttpOnly"));
+        assert!(secure.contains("SameSite=Lax"));
+        assert!(secure.contains("Secure"));
+        let local = set_cookie("overlord_session", "abc", 60, false);
+        assert!(!local.contains("Secure"));
+    }
+
+    #[test]
     fn pkce_matches_the_rfc_vector() {
         let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
         assert_eq!(
