@@ -104,7 +104,7 @@ a.discord-btn { text-decoration: none; }
 .who p, .sidebar-user p { margin: 0; }
 .picker { padding: 28px clamp(20px, 4vw, 48px) 20px; }
 .picker h1, .content h1 { letter-spacing: -0.04em; margin: 0 0 8px; }
-.crumbs { color: var(--muted); font-size: 13px; }
+.crumbs { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .picker-head { display: flex; justify-content: space-between; gap: 20px; align-items: end; }
 .search input, select, input[type="number"], input[type="search"] {
   background: #0d1422;
@@ -130,7 +130,9 @@ a.discord-btn { text-decoration: none; }
 .pill.ok { color: var(--green); background: var(--green-dim); }
 .pill.warn { color: var(--warn); background: var(--warn-dim); }
 .avatar { width: 36px; height: 36px; border-radius: 12px; object-fit: cover; }
+picture.avatar { display: inline-flex; line-height: 0; }
 .avatar.solid { display: grid; place-items: center; background: #243049; font-weight: 700; font-size: 13px; }
+.avatar-crumb { width: 16px; height: 16px; border-radius: 5px; font-size: 9px; }
 
 .app { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
 .sidebar { border-right: 1px solid var(--line); padding: 18px 14px; display: flex; flex-direction: column; gap: 8px; background: #0b101b; position: sticky; top: 0; height: 100vh; }
@@ -138,7 +140,7 @@ a.discord-btn { text-decoration: none; }
 .switcher summary { display: flex; gap: 10px; align-items: center; cursor: pointer; list-style: none; }
 .switcher summary::-webkit-details-marker { display: none; }
 .switcher-menu { display: grid; gap: 6px; margin-top: 8px; }
-.switcher-menu a { color: var(--muted); padding: 6px; border-radius: 8px; }
+.switcher-menu a { color: var(--muted); padding: 6px; border-radius: 8px; display: flex; align-items: center; gap: 8px; }
 .nav-label { color: var(--muted); font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; margin: 16px 8px 6px; }
 .sidenav, .tabbar { display: grid; gap: 4px; }
 .sidenav a, .tabbar a { padding: 10px 12px; border-radius: 10px; color: var(--muted); }
