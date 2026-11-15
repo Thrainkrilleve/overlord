@@ -251,7 +251,23 @@ pub async fn set(
         }
     };
 
+    let before = crate::guild_settings::load(&ctx.data().db, guild_id.get()).await?;
+    let old_text = before.field_text(field);
     crate::guild_settings::set_field(&ctx.data().db, guild_id.get(), field, Some(stored)).await?;
+    let after = crate::guild_settings::load(&ctx.data().db, guild_id.get()).await?;
+    if let Err(err) = crate::audit::record(
+        &ctx.data().db,
+        guild_id.get(),
+        ctx.author().id.get(),
+        &ctx.author().tag(),
+        field.label(),
+        &old_text,
+        &after.field_text(field),
+    )
+    .await
+    {
+        tracing::warn!("settings audit was not saved: {}", err);
+    }
 
     let confirmation = match key.expected() {
         ExpectedValue::TextChannel | ExpectedValue::VoiceChannel | ExpectedValue::Category => {
@@ -278,8 +294,24 @@ pub async fn clear(
 ) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("Must be run in a server")?;
     let field = key.field();
+    let before = crate::guild_settings::load(&ctx.data().db, guild_id.get()).await?;
+    let old_text = before.field_text(field);
     if matches!(key, SettingKey::MinAccountAge) {
         crate::guild_settings::set_field(&ctx.data().db, guild_id.get(), field, Some(3)).await?;
+        let after = crate::guild_settings::load(&ctx.data().db, guild_id.get()).await?;
+        if let Err(err) = crate::audit::record(
+            &ctx.data().db,
+            guild_id.get(),
+            ctx.author().id.get(),
+            &ctx.author().tag(),
+            field.label(),
+            &old_text,
+            &after.field_text(field),
+        )
+        .await
+        {
+            tracing::warn!("settings audit was not saved: {}", err);
+        }
         return reply(
             ctx,
             "Minimum account age reset to 3 days for this server.".into(),
@@ -287,6 +319,20 @@ pub async fn clear(
         .await;
     }
     crate::guild_settings::set_field(&ctx.data().db, guild_id.get(), field, None).await?;
+    let after = crate::guild_settings::load(&ctx.data().db, guild_id.get()).await?;
+    if let Err(err) = crate::audit::record(
+        &ctx.data().db,
+        guild_id.get(),
+        ctx.author().id.get(),
+        &ctx.author().tag(),
+        field.label(),
+        &old_text,
+        &after.field_text(field),
+    )
+    .await
+    {
+        tracing::warn!("settings audit was not saved: {}", err);
+    }
     reply(
         ctx,
         format!(

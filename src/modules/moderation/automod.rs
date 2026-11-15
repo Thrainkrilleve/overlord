@@ -34,9 +34,9 @@ pub async fn inspect_message(ctx: &Context, msg: &Message, db: &DbPool) -> anyho
     };
     let settings = crate::guild_settings::load(db, guild_id.get()).await?;
     let mod_log_channel_id = settings.mod_log_channel_id;
-    let mod_role_id = settings.mod_role_id;
+    let staff_roles = settings.staff_role_list();
 
-    if crate::util::is_staff_message(ctx, msg, guild_id, mod_role_id) {
+    if crate::util::is_staff_message(ctx, msg, guild_id, &staff_roles) {
         return Ok(false);
     }
 

@@ -3,4 +3,3 @@ pub mod commands;
 
 pub use automod::*;
 pub use commands::*;
-

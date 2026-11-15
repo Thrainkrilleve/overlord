@@ -87,8 +87,48 @@ async fn migrate(pool: &DbPool) -> anyhow::Result<()> {
             member_role_id INTEGER,
             mod_role_id INTEGER,
             min_account_age_days INTEGER NOT NULL DEFAULT 3,
+            honeypot_enabled INTEGER NOT NULL DEFAULT 1,
+            raid_join_threshold INTEGER NOT NULL DEFAULT 5,
+            raid_window_seconds INTEGER NOT NULL DEFAULT 10,
+            raid_action TEXT NOT NULL DEFAULT 'alert',
+            staff_role_ids TEXT NOT NULL DEFAULT '',
+            max_open_tickets INTEGER NOT NULL DEFAULT 1,
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS settings_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            field TEXT NOT NULL,
+            old_value TEXT NOT NULL,
+            new_value TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_settings_audit_guild ON settings_audit(guild_id, id);
+
+        CREATE TABLE IF NOT EXISTS dashboard_sessions (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            avatar TEXT,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT,
+            token_expires_at INTEGER NOT NULL,
+            csrf_token TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_events_guild ON security_events(guild_id, id);
         "#,
     )
     .execute(pool)
@@ -97,6 +137,13 @@ async fn migrate(pool: &DbPool) -> anyhow::Result<()> {
     // Tables created before these columns existed are left as-is by CREATE IF NOT EXISTS.
     ensure_column(pool, "infractions", "case_number", "INTEGER").await?;
     ensure_column(pool, "active_temp_voice", "guild_id", "INTEGER").await?;
+    ensure_column(pool, "guild_settings", "honeypot_enabled", "INTEGER").await?;
+    ensure_column(pool, "guild_settings", "raid_join_threshold", "INTEGER").await?;
+    ensure_column(pool, "guild_settings", "raid_window_seconds", "INTEGER").await?;
+    ensure_column(pool, "guild_settings", "raid_action", "TEXT").await?;
+    ensure_column(pool, "guild_settings", "staff_role_ids", "TEXT").await?;
+    ensure_column(pool, "guild_settings", "max_open_tickets", "INTEGER").await?;
+    backfill_guild_setting_defaults(pool).await?;
     backfill_case_numbers(pool).await?;
 
     sqlx::query(
@@ -132,6 +179,26 @@ async fn ensure_column(pool: &DbPool, table: &str, column: &str, decl: &str) -> 
     }
     let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
     sqlx::query(&sql).execute(pool).await?;
+    Ok(())
+}
+
+async fn backfill_guild_setting_defaults(pool: &DbPool) -> anyhow::Result<()> {
+    // Columns added to an existing database are nullable. Fill them so every server keeps
+    // the previous behavior: honeypot follows its channel, raids alert at 5 joins / 10 seconds,
+    // and each person can have one open ticket.
+    sqlx::query(
+        r#"
+        UPDATE guild_settings SET
+            honeypot_enabled = COALESCE(honeypot_enabled, 1),
+            raid_join_threshold = COALESCE(raid_join_threshold, 5),
+            raid_window_seconds = COALESCE(raid_window_seconds, 10),
+            raid_action = COALESCE(raid_action, 'alert'),
+            staff_role_ids = COALESCE(staff_role_ids, ''),
+            max_open_tickets = COALESCE(max_open_tickets, 1)
+        "#,
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -255,6 +322,7 @@ pub async fn get_ticket(
 }
 
 /// Channel ID of the user's ticket that is not yet closed, if any.
+#[allow(dead_code)]
 pub async fn find_open_ticket(
     pool: &DbPool,
     user_id: u64,
@@ -347,6 +415,44 @@ pub async fn is_temp_voice(pool: &DbPool, channel_id: u64, guild_id: u64) -> any
     .await?;
 
     Ok(count.0 > 0)
+}
+
+pub async fn list_open_tickets(
+    pool: &DbPool,
+    user_id: u64,
+    guild_id: u64,
+) -> anyhow::Result<Vec<u64>> {
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        r#"
+        SELECT ticket_channel_id FROM tickets
+        WHERE user_id = ? AND guild_id = ? AND status != 'closed'
+        ORDER BY id ASC
+        "#,
+    )
+    .bind(user_id as i64)
+    .bind(guild_id as i64)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|row| row.0 as u64).collect())
+}
+
+pub async fn record_security_event(
+    pool: &DbPool,
+    guild_id: u64,
+    kind: &str,
+    detail: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO security_events (guild_id, kind, detail) VALUES (?, ?, ?)
+        "#,
+    )
+    .bind(guild_id as i64)
+    .bind(kind)
+    .bind(detail)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn remove_temp_voice(pool: &DbPool, channel_id: u64) -> anyhow::Result<()> {

@@ -9,6 +9,12 @@ services:
       # Takes precedence over .env so the database always lives in the persistent ./data volume.
       # Schema migrations, including per-server settings, run when the container starts.
       - DATABASE_URL=sqlite:///app/data/overlord.db?mode=rwc
+      # The process listens here. The host mapping below is loopback only.
+      - DASHBOARD_BIND=0.0.0.0:8080
+    ports:
+      # Not published on the public interface. A Cloudflare Tunnel on this machine
+      # connects to 127.0.0.1:8080. Leave DASHBOARD_ENABLED=false until that tunnel exists.
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./data:/app/data
 

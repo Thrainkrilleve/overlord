@@ -18,6 +18,15 @@ pub struct GuildSettings {
     pub member_role_id: Option<u64>,
     pub mod_role_id: Option<u64>,
     pub min_account_age_days: i64,
+    /// When false, the honeypot channel is ignored even if one is saved.
+    pub honeypot_enabled: bool,
+    pub raid_join_threshold: i64,
+    pub raid_window_seconds: i64,
+    /// `alert`, `lockdown`, or `ban`. Anything else is treated as `alert`.
+    pub raid_action: String,
+    /// Extra staff roles, comma-separated. `mod_role_id` is always included.
+    pub staff_role_ids: String,
+    pub max_open_tickets: i64,
 }
 
 impl GuildSettings {
@@ -36,6 +45,89 @@ impl GuildSettings {
             member_role_id: None,
             mod_role_id: None,
             min_account_age_days: 3,
+            honeypot_enabled: true,
+            raid_join_threshold: 5,
+            raid_window_seconds: 10,
+            raid_action: "alert".to_string(),
+            staff_role_ids: String::new(),
+            max_open_tickets: 1,
+        }
+    }
+
+    pub fn honeypot_active(&self) -> bool {
+        self.honeypot_enabled && self.honeypot_channel_id.is_some()
+    }
+
+    pub fn raid_threshold(&self) -> usize {
+        self.raid_join_threshold.clamp(2, 50) as usize
+    }
+
+    pub fn raid_window_secs(&self) -> u64 {
+        self.raid_window_seconds.clamp(5, 120) as u64
+    }
+
+    /// Unknown values stay on the non-destructive action.
+    pub fn raid_action_kind(&self) -> &'static str {
+        match self.raid_action.as_str() {
+            "lockdown" => "lockdown",
+            "ban" => "ban",
+            _ => "alert",
+        }
+    }
+
+    pub fn max_tickets(&self) -> i64 {
+        self.max_open_tickets.clamp(1, 5)
+    }
+
+    pub fn staff_role_list(&self) -> Vec<u64> {
+        let mut ids = Vec::new();
+        if let Some(id) = self.mod_role_id {
+            ids.push(id);
+        }
+        for part in self
+            .staff_role_ids
+            .split(|c: char| c == ',' || c.is_whitespace())
+        {
+            if let Ok(id) = part.parse::<u64>() {
+                if id != 0 && !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    }
+
+    pub fn field_text(&self, field: SettingField) -> String {
+        let channel = |id: Option<u64>| {
+            id.map(|id| format!("#{id}"))
+                .unwrap_or_else(|| "Not set".into())
+        };
+        let role = |id: Option<u64>| {
+            id.map(|id| format!("@{id}"))
+                .unwrap_or_else(|| "Not set".into())
+        };
+        match field {
+            SettingField::HoneypotChannel => channel(self.honeypot_channel_id),
+            SettingField::VerifyChannel => channel(self.verify_channel_id),
+            SettingField::ModLogChannel => channel(self.mod_log_channel_id),
+            SettingField::TranscriptChannel => channel(self.transcript_channel_id),
+            SettingField::JoinToCreateChannel => channel(self.join_to_create_channel_id),
+            SettingField::VoiceCategory => channel(self.voice_category_id),
+            SettingField::TicketCategory => channel(self.ticket_category_id),
+            SettingField::UnverifiedRole => role(self.unverified_role_id),
+            SettingField::MemberRole => role(self.member_role_id),
+            SettingField::ModRole => role(self.mod_role_id),
+            SettingField::MinAccountAge => format!("{} days", self.min_account_age_days),
+            SettingField::HoneypotEnabled => {
+                if self.honeypot_enabled {
+                    "On".into()
+                } else {
+                    "Off".into()
+                }
+            }
+            SettingField::RaidJoinThreshold => format!("{} joins", self.raid_threshold()),
+            SettingField::RaidWindowSeconds => format!("{} seconds", self.raid_window_secs()),
+            SettingField::MaxOpenTickets => format!("{} per user", self.max_tickets()),
         }
     }
 }
@@ -54,6 +146,10 @@ pub enum SettingField {
     MemberRole,
     ModRole,
     MinAccountAge,
+    HoneypotEnabled,
+    RaidJoinThreshold,
+    RaidWindowSeconds,
+    MaxOpenTickets,
 }
 
 impl SettingField {
@@ -70,6 +166,10 @@ impl SettingField {
             Self::MemberRole => "member_role_id",
             Self::ModRole => "mod_role_id",
             Self::MinAccountAge => "min_account_age_days",
+            Self::HoneypotEnabled => "honeypot_enabled",
+            Self::RaidJoinThreshold => "raid_join_threshold",
+            Self::RaidWindowSeconds => "raid_window_seconds",
+            Self::MaxOpenTickets => "max_open_tickets",
         }
     }
 
@@ -86,6 +186,25 @@ impl SettingField {
             Self::MemberRole => "Member role",
             Self::ModRole => "Staff role",
             Self::MinAccountAge => "Minimum account age",
+            Self::HoneypotEnabled => "Honeypot trap",
+            Self::RaidJoinThreshold => "Raid threshold",
+            Self::RaidWindowSeconds => "Raid window",
+            Self::MaxOpenTickets => "Max open tickets",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextSetting {
+    RaidAction,
+    StaffRoleIds,
+}
+
+impl TextSetting {
+    fn column(self) -> &'static str {
+        match self {
+            Self::RaidAction => "raid_action",
+            Self::StaffRoleIds => "staff_role_ids",
         }
     }
 }
@@ -103,6 +222,12 @@ struct SettingsRow {
     member_role_id: Option<i64>,
     mod_role_id: Option<i64>,
     min_account_age_days: i64,
+    honeypot_enabled: i64,
+    raid_join_threshold: i64,
+    raid_window_seconds: i64,
+    raid_action: String,
+    staff_role_ids: String,
+    max_open_tickets: i64,
 }
 
 fn snowflake(value: Option<i64>) -> Option<u64> {
@@ -129,6 +254,12 @@ impl SettingsRow {
             member_role_id: snowflake(self.member_role_id),
             mod_role_id: snowflake(self.mod_role_id),
             min_account_age_days: self.min_account_age_days,
+            honeypot_enabled: self.honeypot_enabled != 0,
+            raid_join_threshold: self.raid_join_threshold,
+            raid_window_seconds: self.raid_window_seconds,
+            raid_action: self.raid_action,
+            staff_role_ids: self.staff_role_ids,
+            max_open_tickets: self.max_open_tickets,
         }
     }
 }
@@ -139,7 +270,13 @@ pub async fn load(pool: &DbPool, guild_id: u64) -> anyhow::Result<GuildSettings>
         r#"
         SELECT honeypot_channel_id, verify_channel_id, mod_log_channel_id, transcript_channel_id,
                join_to_create_channel_id, voice_category_id, ticket_category_id,
-               unverified_role_id, member_role_id, mod_role_id, min_account_age_days
+               unverified_role_id, member_role_id, mod_role_id, min_account_age_days,
+               COALESCE(honeypot_enabled, 1) AS honeypot_enabled,
+               COALESCE(raid_join_threshold, 5) AS raid_join_threshold,
+               COALESCE(raid_window_seconds, 10) AS raid_window_seconds,
+               COALESCE(raid_action, 'alert') AS raid_action,
+               COALESCE(staff_role_ids, '') AS staff_role_ids,
+               COALESCE(max_open_tickets, 1) AS max_open_tickets
         FROM guild_settings
         WHERE guild_id = ?
         "#,
@@ -161,6 +298,25 @@ pub async fn set_field(
     value: Option<i64>,
 ) -> anyhow::Result<()> {
     // `column` is one of the fixed names in `SettingField::column`, not user text.
+    let column = field.column();
+    let sql = format!(
+        "INSERT INTO guild_settings (guild_id, {column}) VALUES (?, ?)
+         ON CONFLICT(guild_id) DO UPDATE SET {column} = excluded.{column}, updated_at = datetime('now')"
+    );
+    sqlx::query(&sql)
+        .bind(guild_id as i64)
+        .bind(value)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_text(
+    pool: &DbPool,
+    guild_id: u64,
+    field: TextSetting,
+    value: &str,
+) -> anyhow::Result<()> {
     let column = field.column();
     let sql = format!(
         "INSERT INTO guild_settings (guild_id, {column}) VALUES (?, ?)

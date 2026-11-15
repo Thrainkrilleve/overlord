@@ -62,40 +62,90 @@
    - Under **OAuth2 -> URL Generator**, select `bot` and `applications.commands`.
    - Permissions needed: `Administrator` (or View Channels, Manage Channels, Manage Roles, Kick, Ban, Timeout, Manage Messages, Move Members).
 
-### Configuration (`.env`)
-Copy `.env.example` to `.env` and fill in the token. `GUILD_ID` plus the channel and role IDs are the **initial settings for that one server**. They are copied into the database the first time the bot starts. Every server the bot is in, including that one afterwards, is configured with `/config set`.
+### One process, many servers
 
+Invite the same bot to every server you moderate. Each server keeps its own channels, roles, account-age rule, raid policy, and ticket limits in SQLite. A log, transcript, role grant, or raid count from one server is never applied in another. A feature that has not been set in a server does nothing there.
+
+`GUILD_ID` and the channel and role IDs in `.env` are only the **first-run copy** for that one server. After the first start, change them in Discord or in the dashboard. Later edits to those `.env` values do not overwrite a server that already has saved settings.
+
+### Configuration (`.env`)
 ```bash
 cp .env.example .env
 ```
 
-One process can be invited to many servers. Logs, roles, tickets, transcripts, verification codes, and raid tracking stay inside the server the event came from. A feature that has not been configured in a server does nothing there.
+Fill in `DISCORD_TOKEN`. Set `GUILD_ID` to the server that should receive the initial channel and role IDs. Leave `DASHBOARD_ENABLED=false` until you want the web UI.
 
----
+### Per-server slash commands
 
-## 🐳 Running with Docker (Home Server / Ubuntu)
+Administrators configure the server they are standing in:
 
-### Using Docker Compose (Recommended)
-```bash
-docker compose up -d --build
+| Command | What it does |
+| :--- | :--- |
+| `/config show` | Shows this server's saved settings. Only visible to you. |
+| `/config set` | Sets one channel, role, or the minimum account age. The choice must belong to this server. |
+| `/config clear` | Turns a channel or role feature off. Clearing account age resets it to 3 days. |
+| `/security_status` | Same picture as `/config show`, including honeypot, raid window, and ticket limit. |
+| `/setup_verification` | Posts the verification button and remembers this channel as the verify channel. |
+| `/setup_tickets` | Posts the ticket panel in the current channel. |
+
+Case numbers start at 1 in each server. `/infractions` only lists cases from the server where you ran it.
+
+### Web dashboard
+
+The dashboard is optional and served by the same process, on the same SQLite file. A save is live: the next join, message, or ticket uses the new value.
+
+Turn it on with `DASHBOARD_ENABLED=true` and the `DASHBOARD_*` values in `.env.example`. Sign in with **Continue with Discord** (OAuth2 authorization code, PKCE, HttpOnly `SameSite=Lax` cookies). The server list is only communities where you have **Manage Server** or **Administrator**. If Overlord is already in that server, open its dashboard and edit that server's settings. If not, the card opens `/install?guild_id=...`. The separate **Add Overlord to a server** card is `/install` with no server pre-selected. Every save checks the permission again with Discord, rejects a channel or role that is not in that server, and appends a row to the audit log (who, which setting, old value, new value, when).
+
+`GET /install` is public. It answers **302** with Discord's bot invite (`bot` and `applications.commands`, permissions from `DASHBOARD_INVITE_PERMISSIONS`). Use it as the application's **Custom Install URL**. The "Add Overlord to a server" card calls `/install?guild_id=...` so the same route can pre-select a server.
+
+Example, with a placeholder hostname:
+
+```text
+https://overlord.example.com/install
+https://overlord.example.com/auth/callback
 ```
 
-View logs:
+Replace `overlord.example.com` with the hostname your tunnel serves. Do not commit that hostname or the OAuth client secret.
+
+### Self-host with Docker and a Cloudflare Tunnel
+
+The container does not publish the dashboard on the public internet. `docker-compose.yml` binds `127.0.0.1:8080` only.
+
 ```bash
+cp .env.example .env
+# set DISCORD_TOKEN, GUILD_ID, and the DASHBOARD_* values
+docker compose up -d --build
 docker compose logs -f
 ```
 
-Stop the bot:
+Point a Cloudflare Tunnel at the loopback port:
+
 ```bash
-docker compose down
+cloudflared tunnel --url http://127.0.0.1:8080
 ```
 
-### Direct Cargo Run (Local Testing)
+For a named tunnel, the public hostname is whatever you configure in Cloudflare (for example `https://overlord.example.com`) and the origin is `http://127.0.0.1:8080`. If `cloudflared` runs as another container on the compose network, use `http://overlord:8080` and you can drop the host port. Set `DASHBOARD_TRUST_CLOUDFLARE=true` only when that tunnel is the only client, so rate limits use `CF-Connecting-IP`.
+
+In the Discord Developer Portal:
+
+1. **OAuth2 → Redirects:** `https://overlord.example.com/auth/callback`
+2. **Installation → Install Link → Custom URL:** `https://overlord.example.com/install`
+
+The step-by-step version, including roles, channels, and the first-run database copy, is [SETUP.md](SETUP.md).
+
+---
+
+## 🐳 Local cargo run
+
+Docker and the tunnel are covered above. To run on the host instead:
+
 ```bash
 # Requires Rust 1.88+
-cargo test
+cargo test --locked
 cargo run --release
 ```
+
+Stop a Docker deploy with `docker compose down`. The database stays in `./data`.
 
 ---
 
@@ -127,6 +177,8 @@ src/
 ├── guild_settings.rs         # Per-server channels, roles, and account-age policy
 ├── util.rs                   # Embed limits, mod-log posting, same-server checks
 ├── database.rs               # SQLite pool, schema migrations, cases, tickets, temp voice
+├── audit.rs                  # Who changed which setting, old value and new value
+├── dashboard/                # Optional web UI, Discord login, and GET /install
 └── modules/
     ├── settings.rs           # /config show, set, and clear
     ├── security/             # Honeypot, account age filters, per-guild anti-raid

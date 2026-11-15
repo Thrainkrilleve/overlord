@@ -60,8 +60,9 @@ fn is_staff(interaction: &ComponentInteraction, settings: &GuildSettings) -> boo
         return false;
     };
     let has_mod_role = settings
-        .mod_role_id
-        .is_some_and(|id| member.roles.contains(&RoleId::new(id)));
+        .staff_role_list()
+        .iter()
+        .any(|id| member.roles.contains(&RoleId::new(*id)));
     let can_manage = member.permissions.is_some_and(|p| {
         p.contains(Permissions::MANAGE_CHANNELS) || p.contains(Permissions::ADMINISTRATOR)
     });
@@ -137,20 +138,30 @@ pub async fn handle_ticket_modal_submit(
 
     let user = &interaction.user;
 
-    // One open ticket per user. If the recorded channel was deleted by hand, release it.
-    if let Some(existing) =
-        crate::database::find_open_ticket(db, user.id.get(), guild_id.get()).await?
-    {
+    // Cap open tickets per person. A channel deleted by hand no longer counts.
+    let open_limit = settings.max_tickets();
+    let mut live_open = Vec::new();
+    for existing in crate::database::list_open_tickets(db, user.id.get(), guild_id.get()).await? {
         if ctx.http.get_channel(ChannelId::new(existing)).await.is_ok() {
-            let reply = CreateInteractionResponseMessage::new()
-                .content(format!("You already have an open ticket: <#{}>", existing))
-                .ephemeral(true);
-            interaction
-                .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
-                .await?;
-            return Ok(());
+            live_open.push(existing);
+        } else {
+            crate::database::close_ticket(db, existing).await?;
         }
-        crate::database::close_ticket(db, existing).await?;
+    }
+    if (live_open.len() as i64) >= open_limit {
+        let where_to = live_open
+            .first()
+            .map(|id| format!(" <#{}>", id))
+            .unwrap_or_default();
+        let reply = CreateInteractionResponseMessage::new()
+            .content(format!(
+                "You already have an open ticket{where_to}. This server allows {open_limit}."
+            ))
+            .ephemeral(true);
+        interaction
+            .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+            .await?;
+        return Ok(());
     }
 
     let mut subject = String::new();
@@ -188,16 +199,19 @@ pub async fn handle_ticket_modal_submit(
         },
     ];
 
-    let staff_role = crate::util::role_in_guild(ctx, guild_id, settings.mod_role_id).await;
-    if let Some(mod_role) = staff_role {
-        overwrites.push(PermissionOverwrite {
-            allow: Permissions::VIEW_CHANNEL
-                | Permissions::SEND_MESSAGES
-                | Permissions::READ_MESSAGE_HISTORY
-                | Permissions::ATTACH_FILES,
-            deny: Permissions::empty(),
-            kind: PermissionOverwriteType::Role(mod_role),
-        });
+    let mut staff_added = false;
+    for role_id in settings.staff_role_list() {
+        if let Some(mod_role) = crate::util::role_in_guild(ctx, guild_id, Some(role_id)).await {
+            staff_added = true;
+            overwrites.push(PermissionOverwrite {
+                allow: Permissions::VIEW_CHANNEL
+                    | Permissions::SEND_MESSAGES
+                    | Permissions::READ_MESSAGE_HISTORY
+                    | Permissions::ATTACH_FILES,
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Role(mod_role),
+            });
+        }
     }
 
     let channel_name = format!("ticket-{}", user.name.to_lowercase().replace(' ', "-"));
@@ -239,9 +253,9 @@ pub async fn handle_ticket_modal_submit(
         .timestamp(chrono::Utc::now());
 
     let mut notes = Vec::new();
-    if settings.mod_role_id.is_none() {
+    if settings.staff_role_list().is_empty() {
         notes.push("No staff role is set, so only members who can manage channels will see this ticket. An admin can set it with `/config set`.");
-    } else if staff_role.is_none() {
+    } else if !staff_added {
         notes.push("The staff role saved for this server is not a role here, so staff may not see this ticket. An admin can set it again with `/config set`.");
     }
     if settings.transcript_channel_id.is_none() {

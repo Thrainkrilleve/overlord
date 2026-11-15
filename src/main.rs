@@ -1,4 +1,6 @@
+mod audit;
 mod config;
+mod dashboard;
 mod database;
 mod guild_settings;
 mod modules;
@@ -197,8 +199,18 @@ async fn event_handler(
                 );
             }
 
-            // 2. Anti-raid tracking for this guild only
-            let (count, should_alert) = data.raid_tracker.record_join(guild_id.get()).await;
+            // 2. Anti-raid tracking for this guild only, using this server's saved threshold.
+            let threshold = settings.raid_threshold();
+            let window_secs = settings.raid_window_secs();
+            let (count, should_alert) = data
+                .raid_tracker
+                .record_join_with(
+                    guild_id.get(),
+                    threshold,
+                    std::time::Duration::from_secs(window_secs),
+                )
+                .await;
+            let in_raid = count >= threshold;
             if should_alert {
                 warn!(
                     target: "security::anti_raid",
@@ -216,9 +228,51 @@ async fn event_handler(
                     ctx,
                     guild_id,
                     settings.mod_log_channel_id,
-                    security::raid_alert_embed(count),
+                    security::raid_alert_embed(count, window_secs, settings.raid_action_kind()),
                 )
                 .await;
+                log_failure(
+                    "record raid alert",
+                    database::record_security_event(
+                        &data.db,
+                        guild_id.get(),
+                        "raid",
+                        &format!("{count} joins / {window_secs}s"),
+                    )
+                    .await,
+                );
+            }
+            let owner_id = ctx.cache.guild(guild_id).map(|guild| guild.owner_id);
+            let spare_owner = owner_id == Some(new_member.user.id) || new_member.user.bot;
+            if !spare_owner {
+                match security::enforcement(settings.raid_action_kind(), in_raid) {
+                    security::RaidEnforcement::Kick => {
+                        log_failure(
+                            "raid lockdown kick",
+                            guild_id
+                                .kick_with_reason(
+                                    &ctx.http,
+                                    new_member.user.id,
+                                    "Overlord raid lockdown",
+                                )
+                                .await,
+                        );
+                    }
+                    security::RaidEnforcement::Ban => {
+                        log_failure(
+                            "raid ban",
+                            guild_id
+                                .ban_with_reason(
+                                    &ctx.http,
+                                    new_member.user.id,
+                                    1,
+                                    "Overlord raid lockdown: ban new joins",
+                                )
+                                .await,
+                        );
+                    }
+                    security::RaidEnforcement::None => {}
+                }
             }
 
             // 3. Account safety evaluation against this server's minimum age
@@ -391,6 +445,10 @@ async fn main() -> anyhow::Result<()> {
         log_settings_warnings(&guild_settings::load(&db, guild_id).await?);
     } else {
         info!("No GUILD_ID in the environment. Each server configures itself with /config. Nothing was copied from .env.");
+    }
+
+    if let Some(dashboard_cfg) = config.dashboard.clone() {
+        dashboard::spawn(dashboard_cfg, db.clone(), bot_token.clone()).await?;
     }
 
     let intents = GatewayIntents::GUILDS
