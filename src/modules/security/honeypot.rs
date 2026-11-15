@@ -18,6 +18,9 @@ pub async fn handle_honeypot_message(
         None => return Ok(()),
     };
     let settings = crate::guild_settings::load(db, guild_id.get()).await?;
+    if !settings.honeypot_enabled {
+        return Ok(());
+    }
     let Some(honeypot_channel_id) = settings.honeypot_channel_id else {
         return Ok(());
     };
@@ -25,7 +28,6 @@ pub async fn handle_honeypot_message(
         return Ok(());
     }
     let mod_log_channel_id = settings.mod_log_channel_id;
-    let mod_role_id = settings.mod_role_id;
 
     let author_id = msg.author.id;
     let author_tag = format!("{} ({})", msg.author.tag(), author_id.get());
@@ -36,7 +38,7 @@ pub async fn handle_honeypot_message(
 
     // Staff posts are a test of the trap (and protect against accidental posts): detect and log,
     // but never ban
-    if crate::util::is_staff_message(ctx, msg, guild_id, mod_role_id) {
+    if crate::util::is_staff_message(ctx, msg, guild_id, &settings.staff_role_list()) {
         info!(target: "security::honeypot", "Honeypot test by staff member {}", author_tag);
         let embed = CreateEmbed::new()
             .title("🧪 Honeypot Test: Trap Working")

@@ -154,12 +154,15 @@ pub fn is_staff_message(
     ctx: &Context,
     msg: &Message,
     guild_id: GuildId,
-    mod_role_id: Option<u64>,
+    staff_role_ids: &[u64],
 ) -> bool {
     let Some(member) = &msg.member else {
         return false;
     };
-    if mod_role_id.is_some_and(|id| member.roles.contains(&RoleId::new(id))) {
+    if staff_role_ids
+        .iter()
+        .any(|id| member.roles.contains(&RoleId::new(*id)))
+    {
         return true;
     }
     let Some(guild) = ctx.cache.guild(guild_id) else {

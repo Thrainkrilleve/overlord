@@ -1,5 +1,5 @@
-use serenity::model::guild::Member;
 use chrono::{DateTime, Utc};
+use serenity::model::guild::Member;
 
 pub struct AccountCheckResult {
     pub is_suspicious: bool,
@@ -13,7 +13,11 @@ pub fn check_member(member: &Member, min_age_days: i64) -> AccountCheckResult {
     evaluate_account(account_age_days, member.user.avatar.is_some(), min_age_days)
 }
 
-fn evaluate_account(account_age_days: i64, has_avatar: bool, min_age_days: i64) -> AccountCheckResult {
+fn evaluate_account(
+    account_age_days: i64,
+    has_avatar: bool,
+    min_age_days: i64,
+) -> AccountCheckResult {
     if account_age_days < min_age_days {
         return AccountCheckResult {
             is_suspicious: true,
