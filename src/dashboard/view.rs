@@ -723,7 +723,7 @@ fn document_head(title: &str) -> String {
 <title>{}</title>
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/app.css?v=2">
 </head>"#,
         esc(title)
     )
@@ -1395,6 +1395,7 @@ mod tests {
         ];
         for html in pages {
             assert!(html.contains("aria-label=\"Breadcrumb\""));
+            assert!(html.contains("<nav class=\"crumbs\""));
             assert!(html.contains("<ol>"));
             assert!(html.contains("href=\"/servers\""));
             assert!(html.contains("href=\"/servers/10\""));
@@ -1402,6 +1403,12 @@ mod tests {
             assert!(html.contains("Thrain&#39;s server"));
             assert!(!html.to_ascii_lowercase().contains("style="));
         }
+        let css = include_str!("app.css");
+        assert!(css.contains("nav.crumbs ol {\n  display: flex;\n  flex-direction: row;"));
+        assert!(css.contains("nav.crumbs li {\n  display: inline-flex;"));
+        assert!(css.contains("list-style: none;"));
+        assert!(css.contains("nav.crumbs li::marker {\n  content: \"\";\n}"));
+        assert!(!css.contains("unsafe-inline"));
         let list = servers_page(&[], &[], &[], "mod", None, 1, None);
         assert!(list.contains("aria-current=\"page\">Servers"));
         assert!(!list.contains("href=\"/servers/10\""));
@@ -1414,6 +1421,6 @@ mod tests {
         assert!(html.contains("href=\"/auth/discord\""));
         assert!(!html.contains("<form"));
         assert!(html.contains("Sign-in was cancelled."));
-        assert!(html.contains("/assets/app.css"));
+        assert!(html.contains("/assets/app.css?v=2"));
     }
 }

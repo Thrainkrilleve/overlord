@@ -2402,6 +2402,8 @@ mod tests {
         assert!(css_body.contains("@media (max-width: 980px)"));
         assert!(css_body.contains(".m-tabbar"));
         assert!(css_body.contains("font-family: \"Geist\""));
+        assert!(css_body.contains("nav.crumbs ol {\n  display: flex;\n  flex-direction: row;"));
+        assert!(css_body.contains("nav.crumbs li::marker {\n  content: \"\";\n}"));
         let missing = router(state.clone())
             .oneshot(
                 Request::builder()
