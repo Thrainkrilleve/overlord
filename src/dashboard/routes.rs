@@ -19,6 +19,7 @@ use crate::database::DbPool;
 use crate::guild_settings;
 
 use super::api::{ApiError, DiscordApi, LiveDiscord, UserGuild};
+use super::create;
 use super::guard::{self, client_ip, cookie_value, set_cookie, RateLimiter};
 use super::store::{self, Session};
 use super::validate::{self, Write};
@@ -76,6 +77,8 @@ pub fn router(state: AppState) -> Router {
         .route("/logout", post(logout))
         .route("/servers", get(servers))
         .route("/servers/:guild_id", get(overview))
+        .route("/servers/:guild_id/resources", post(create_resource))
+        .route("/servers/:guild_id/layout", get(layout_page).post(apply_layout))
         .route("/servers/:guild_id/moderation", get(moderation))
         .route(
             "/servers/:guild_id/security",
@@ -153,9 +156,13 @@ async fn limit_requests(
         state.cfg.trust_cloudflare,
     );
     let post = request.method() == axum::http::Method::POST;
-    let auth = request.uri().path().starts_with("/auth/");
+    let path = request.uri().path();
+    let auth = path.starts_with("/auth/");
+    let creating = post && (path.ends_with("/resources") || path.ends_with("/layout"));
     let (limit, key) = if auth {
         (20, format!("auth:{ip}"))
+    } else if creating {
+        (8, format!("create:{ip}"))
     } else if post {
         (30, format!("post:{ip}"))
     } else {
@@ -222,6 +229,7 @@ fn notice(value: Option<&str>) -> Option<&'static str> {
         Some("permission") => Some("You need Manage Server in that community."),
         Some("invalid") => Some("A channel or role in that form is not part of this server."),
         Some("csrf") => Some("That form expired. Reload the page and try again."),
+        Some("created") => Some("Created and assigned. The bot is using it now."),
         _ => None,
     }
 }
@@ -473,6 +481,7 @@ async fn overview(
                     .unwrap_or_default();
                 let names = lookup_names(&state, &rows).await;
                 view::overview_body(
+                    guild_id,
                     &stats,
                     &rows,
                     &|id| names.get(&id).cloned().unwrap_or_else(|| id.to_string()),
@@ -523,7 +532,7 @@ async fn security(
             Box::pin(async move {
                 let channels = state.discord.channels(guild_id).await.unwrap_or_default();
                 let roles = state.discord.roles(guild_id).await.unwrap_or_default();
-                view::security_body(&settings, &channels, &roles, &csrf)
+                view::security_body(guild_id, &settings, &channels, &roles, &csrf)
             })
         },
     )
@@ -549,7 +558,7 @@ async fn verification(
             Box::pin(async move {
                 let channels = state.discord.channels(guild_id).await.unwrap_or_default();
                 let roles = state.discord.roles(guild_id).await.unwrap_or_default();
-                view::verification_body(&settings, &channels, &roles, &csrf)
+                view::verification_body(guild_id, &settings, &channels, &roles, &csrf)
             })
         },
     )
@@ -577,6 +586,7 @@ async fn tickets(
                 let roles = state.discord.roles(guild_id).await.unwrap_or_default();
                 let stats = store::week_stats(&state.db, guild_id).await.ok();
                 view::tickets_body(
+                    guild_id,
                     &settings,
                     &channels,
                     &roles,
@@ -612,7 +622,7 @@ async fn voice(
                     .await
                     .map(|s| s.temp_rooms)
                     .unwrap_or(0);
-                view::voice_body(&settings, &channels, rooms, &csrf)
+                view::voice_body(guild_id, &settings, &channels, rooms, &csrf)
             })
         },
     )
@@ -814,6 +824,447 @@ async fn save_voice(
         "voice",
     )
     .await
+}
+
+#[derive(Deserialize)]
+struct CreateForm {
+    #[serde(default)]
+    csrf: String,
+    #[serde(default)]
+    resource: String,
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    parent_id: String,
+    #[serde(default)]
+    category_name: String,
+    #[serde(default)]
+    private: Option<String>,
+    #[serde(default)]
+    color: String,
+    #[serde(default)]
+    hoist: Option<String>,
+    #[serde(default)]
+    mentionable: Option<String>,
+}
+
+async fn create_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(guild_id): Path<u64>,
+    HtmlForm(form): HtmlForm<CreateForm>,
+) -> Response {
+    let Some(session) = session_from(&state, &headers).await else {
+        return redirect("/", &[]);
+    };
+    let Some(target) = create::ResourceTarget::parse(&form.target) else {
+        return message(StatusCode::BAD_REQUEST, "That setting cannot be created from here.");
+    };
+    if !form_csrf_ok(&state, &headers, &session.csrf_token, &form.csrf) {
+        return redirect(
+            &format!("/servers/{guild_id}/{}?notice=csrf", target.slug()),
+            &[],
+        );
+    }
+    if !user_can_manage(&state, &session, guild_id).await {
+        return message(
+            StatusCode::FORBIDDEN,
+            "You need Manage Server in that community.",
+        );
+    }
+    let Ok(access) = state.discord.bot_access(guild_id).await else {
+        return message(
+            StatusCode::BAD_GATEWAY,
+            "Discord could not confirm Overlord's permissions in that server.",
+        );
+    };
+    let reason = create::reason_header(&session.username);
+    let result = if form.resource == "role" || target.is_role() {
+        create_and_assign_role(&state, guild_id, &session, target, &form, &access, &reason).await
+    } else {
+        create_and_assign_channel(&state, guild_id, &session, target, &form, &access, &reason).await
+    };
+    match result {
+        Ok(()) => redirect(
+            &format!("/servers/{guild_id}/{}?notice=created", target.slug()),
+            &[],
+        ),
+        Err(text) => message(StatusCode::BAD_REQUEST, text),
+    }
+}
+
+async fn create_and_assign_channel(
+    state: &AppState,
+    guild_id: u64,
+    session: &store::Session,
+    target: create::ResourceTarget,
+    form: &CreateForm,
+    access: &super::api::BotAccess,
+    reason: &str,
+) -> Result<(), &'static str> {
+    if let Some(text) = create::channel_permission_error(access.permissions) {
+        return Err(text);
+    }
+    let kind = create::kind_for_target(target, &form.kind)?;
+    let name = create::validate_name(&form.name)?;
+    let settings = guild_settings::load(&state.db, guild_id)
+        .await
+        .map_err(|_| "The settings database could not be read.")?;
+    let mut parent = create::parse_optional_id(&form.parent_id)?;
+    if !form.category_name.trim().is_empty() {
+        let category_name = create::validate_name(&form.category_name)?;
+        let category = state
+            .discord
+            .create_channel(
+                guild_id,
+                &create::new_channel(
+                    category_name.clone(),
+                    super::api::ChannelKind::Category,
+                    None,
+                    false,
+                    guild_id,
+                    &[],
+                    access.bot_id,
+                ),
+                reason,
+            )
+            .await
+            .map_err(|_| "Discord did not create that category.")?;
+        record_create(
+            state,
+            guild_id,
+            session,
+            "Created category",
+            &category.name,
+        )
+        .await?;
+        parent = Some(category.id);
+    }
+    let private = form.private.as_deref() == Some("1");
+    let channel = state
+        .discord
+        .create_channel(
+            guild_id,
+            &create::new_channel(
+                name,
+                kind,
+                parent,
+                private,
+                guild_id,
+                &settings.staff_role_list(),
+                access.bot_id,
+            ),
+            reason,
+        )
+        .await
+        .map_err(|_| "Discord did not create that channel.")?;
+    assign_channel(state, guild_id, target, channel.id).await?;
+    record_create(state, guild_id, session, "Created channel", &channel.name).await
+}
+
+async fn create_and_assign_role(
+    state: &AppState,
+    guild_id: u64,
+    session: &store::Session,
+    target: create::ResourceTarget,
+    form: &CreateForm,
+    access: &super::api::BotAccess,
+    reason: &str,
+) -> Result<(), &'static str> {
+    if let Some(text) = create::role_permission_error(access.permissions) {
+        return Err(text);
+    }
+    let name = create::validate_name(&form.name)?;
+    let color = create::parse_color(&form.color)?;
+    let role = state
+        .discord
+        .create_role(
+            guild_id,
+            &super::api::NewRole {
+                name,
+                color,
+                hoist: form.hoist.as_deref() == Some("1"),
+                mentionable: form.mentionable.as_deref() == Some("1"),
+                position: create::role_position_below_bot(access.highest_role_position),
+            },
+            reason,
+        )
+        .await
+        .map_err(|_| "Discord did not create that role.")?;
+    assign_role(state, guild_id, target, role.id).await?;
+    record_create(state, guild_id, session, "Created role", &role.name).await
+}
+
+async fn layout_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(guild_id): Path<u64>,
+) -> Response {
+    page(&state, &headers, guild_id, Nav::Overview, None, |ctx| {
+        let state = ctx.state.clone();
+        let settings = ctx.settings.clone();
+        let csrf = ctx.session.csrf_token.clone();
+        Box::pin(async move {
+            let channels = state.discord.channels(guild_id).await.unwrap_or_default();
+            let roles = state.discord.roles(guild_id).await.unwrap_or_default();
+            let plan = create::recommended_layout(&settings, &channels, &roles);
+            view::layout_body(guild_id, &plan, &channels, &roles, &csrf)
+        })
+    })
+    .await
+}
+
+async fn apply_layout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(guild_id): Path<u64>,
+    HtmlForm(form): HtmlForm<CsrfForm>,
+) -> Response {
+    let Some(session) = session_from(&state, &headers).await else {
+        return redirect("/", &[]);
+    };
+    if !form_csrf_ok(&state, &headers, &session.csrf_token, &form.csrf) {
+        return redirect(&format!("/servers/{guild_id}/layout?notice=csrf"), &[]);
+    }
+    if !user_can_manage(&state, &session, guild_id).await {
+        return message(
+            StatusCode::FORBIDDEN,
+            "You need Manage Server in that community.",
+        );
+    }
+    let settings = match guild_settings::load(&state.db, guild_id).await {
+        Ok(settings) => settings,
+        Err(_) => return message(StatusCode::BAD_REQUEST, "The settings database could not be read."),
+    };
+    let channels = state.discord.channels(guild_id).await.unwrap_or_default();
+    let roles = state.discord.roles(guild_id).await.unwrap_or_default();
+    let plan = create::recommended_layout(&settings, &channels, &roles);
+    let Ok(access) = state.discord.bot_access(guild_id).await else {
+        return message(
+            StatusCode::BAD_GATEWAY,
+            "Discord could not confirm Overlord's permissions in that server.",
+        );
+    };
+    if create::layout_needs_channels(&plan) {
+        if let Some(text) = create::channel_permission_error(access.permissions) {
+            return message(StatusCode::FORBIDDEN, text);
+        }
+    }
+    if create::layout_needs_roles(&plan) {
+        if let Some(text) = create::role_permission_error(access.permissions) {
+            return message(StatusCode::FORBIDDEN, text);
+        }
+    }
+    let reason = create::reason_header(&session.username);
+    let mut groups: HashMap<&str, u64> = HashMap::new();
+    let mut category_id = match plan.iter().find(|item| item.label == "Overlord category") {
+        Some(item) => match item.action {
+            create::LayoutAction::Reuse(id) => Some(id),
+            _ => None,
+        },
+        None => None,
+    };
+    for item in &plan {
+        let id = if let (Some(group), Some(id)) = (item.group, item.group.and_then(|group| groups.get(group).copied())) {
+            let _ = group;
+            id
+        } else {
+            match &item.action {
+                create::LayoutAction::Reuse(id) => *id,
+                create::LayoutAction::CreateChannel { name, kind } => {
+                    let parent = if *kind == super::api::ChannelKind::Category {
+                        None
+                    } else {
+                        category_id
+                    };
+                    let created = match state
+                        .discord
+                        .create_channel(
+                            guild_id,
+                            &create::new_channel(
+                                (*name).to_string(),
+                                *kind,
+                                parent,
+                                false,
+                                guild_id,
+                                &settings.staff_role_list(),
+                                access.bot_id,
+                            ),
+                            &reason,
+                        )
+                        .await
+                    {
+                        Ok(created) => created,
+                        Err(_) => {
+                            return message(StatusCode::BAD_GATEWAY, "Discord did not create one of the channels. Reload the preview and try again.")
+                        }
+                    };
+                    if *kind == super::api::ChannelKind::Category {
+                        category_id = Some(created.id);
+                    }
+                    if let Err(text) = record_create(&state, guild_id, &session, "Created channel", &created.name).await {
+                        return message(StatusCode::BAD_REQUEST, text);
+                    }
+                    if let Some(group) = item.group {
+                        groups.insert(group, created.id);
+                    }
+                    created.id
+                }
+                create::LayoutAction::CreateRole { name } => {
+                    let created = match state
+                        .discord
+                        .create_role(
+                            guild_id,
+                            &super::api::NewRole {
+                                name: (*name).to_string(),
+                                color: 0,
+                                hoist: false,
+                                mentionable: false,
+                                position: create::role_position_below_bot(access.highest_role_position),
+                            },
+                            &reason,
+                        )
+                        .await
+                    {
+                        Ok(created) => created,
+                        Err(_) => {
+                            return message(StatusCode::BAD_GATEWAY, "Discord did not create one of the roles. Reload the preview and try again.")
+                        }
+                    };
+                    if let Err(text) = record_create(&state, guild_id, &session, "Created role", &created.name).await {
+                        return message(StatusCode::BAD_REQUEST, text);
+                    }
+                    created.id
+                }
+            }
+        };
+        if let Err(text) = assign_field(&state, guild_id, item.field, id).await {
+            return message(StatusCode::BAD_REQUEST, text);
+        }
+    }
+    redirect(&format!("/servers/{guild_id}?notice=created"), &[])
+}
+
+async fn assign_channel(
+    state: &AppState,
+    guild_id: u64,
+    target: create::ResourceTarget,
+    id: u64,
+) -> Result<(), &'static str> {
+    let Some(field) = target.setting() else {
+        return Err("That setting cannot store a channel.");
+    };
+    guild_settings::set_field(&state.db, guild_id, field, Some(id as i64))
+        .await
+        .map_err(|_| "The settings database could not be written.")?;
+    Ok(())
+}
+
+async fn assign_role(
+    state: &AppState,
+    guild_id: u64,
+    target: create::ResourceTarget,
+    id: u64,
+) -> Result<(), &'static str> {
+    if target == create::ResourceTarget::StaffRole {
+        return assign_field(state, guild_id, create::LayoutField::Staff, id).await;
+    }
+    let Some(field) = target.setting() else {
+        return Err("That setting cannot store a role.");
+    };
+    guild_settings::set_field(&state.db, guild_id, field, Some(id as i64))
+        .await
+        .map_err(|_| "The settings database could not be written.")?;
+    Ok(())
+}
+
+async fn assign_field(
+    state: &AppState,
+    guild_id: u64,
+    field: create::LayoutField,
+    id: u64,
+) -> Result<(), &'static str> {
+    match field {
+        create::LayoutField::Channel(setting) => {
+            guild_settings::set_field(&state.db, guild_id, setting, Some(id as i64))
+                .await
+                .map_err(|_| "The settings database could not be written.")?;
+        }
+        create::LayoutField::Staff => {
+            let settings = guild_settings::load(&state.db, guild_id)
+                .await
+                .map_err(|_| "The settings database could not be read.")?;
+            let mut ids = settings.staff_role_list();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            let csv = ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            guild_settings::set_text(
+                &state.db,
+                guild_id,
+                guild_settings::TextSetting::StaffRoleIds,
+                &csv,
+            )
+            .await
+            .map_err(|_| "The settings database could not be written.")?;
+            if settings.mod_role_id.is_none() {
+                guild_settings::set_field(
+                    &state.db,
+                    guild_id,
+                    guild_settings::SettingField::ModRole,
+                    Some(id as i64),
+                )
+                .await
+                .map_err(|_| "The settings database could not be written.")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn record_create(
+    state: &AppState,
+    guild_id: u64,
+    session: &store::Session,
+    field: &str,
+    name: &str,
+) -> Result<(), &'static str> {
+    audit::record(
+        &state.db,
+        guild_id,
+        session.user_id,
+        &session.username,
+        field,
+        "",
+        name,
+    )
+    .await
+    .map_err(|_| "The audit log could not be written.")?;
+    Ok(())
+}
+
+async fn user_can_manage(state: &AppState, session: &store::Session, guild_id: u64) -> bool {
+    manageable(state, session)
+        .await
+        .ok()
+        .and_then(|guilds| {
+            guilds.into_iter().find(|guild| {
+                guild.id == guild_id && guard::can_manage_server(guild.owner, guild.permissions)
+            })
+        })
+        .is_some()
+}
+
+fn message(status: StatusCode, text: &'static str) -> Response {
+    html(status, view::message_page("Couldn't create that", text))
 }
 
 async fn favicon_ico() -> Response {
@@ -1192,6 +1643,8 @@ mod tests {
         channels: Vec<super::super::api::ChannelChoice>,
         roles: Vec<super::super::api::RoleChoice>,
         bot_guilds: Vec<u64>,
+        access: Option<super::super::api::BotAccess>,
+        made: std::sync::Mutex<Vec<u64>>,
     }
 
     #[async_trait::async_trait]
@@ -1223,6 +1676,38 @@ mod tests {
         }
         async fn display_name(&self, user_id: u64) -> Result<String, ApiError> {
             Ok(user_id.to_string())
+        }
+        async fn bot_access(&self, _: u64) -> Result<super::super::api::BotAccess, ApiError> {
+            self.access.ok_or(ApiError::Unavailable)
+        }
+        async fn create_channel(
+            &self,
+            _: u64,
+            spec: &super::super::api::NewChannel,
+            _: &str,
+        ) -> Result<super::super::api::ChannelChoice, ApiError> {
+            let mut made = self.made.lock().unwrap_or_else(|err| err.into_inner());
+            let id = 900 + made.len() as u64;
+            made.push(id);
+            Ok(super::super::api::ChannelChoice {
+                id,
+                name: spec.name.clone(),
+                kind: spec.kind,
+            })
+        }
+        async fn create_role(
+            &self,
+            _: u64,
+            spec: &super::super::api::NewRole,
+            _: &str,
+        ) -> Result<super::super::api::RoleChoice, ApiError> {
+            let mut made = self.made.lock().unwrap_or_else(|err| err.into_inner());
+            let id = 700 + made.len() as u64;
+            made.push(id);
+            Ok(super::super::api::RoleChoice {
+                id,
+                name: spec.name.clone(),
+            })
         }
     }
 
@@ -1347,6 +1832,7 @@ mod tests {
             channels: vec![channel],
             roles: Vec::new(),
             bot_guilds: vec![10],
+            ..Fake::default()
         };
         let denied = Fake {
             guilds: vec![UserGuild {
@@ -1359,6 +1845,7 @@ mod tests {
             channels: allowed.channels.clone(),
             roles: Vec::new(),
             bot_guilds: vec![10],
+            ..Fake::default()
         };
 
         let anonymous = router(AppState {
@@ -1468,6 +1955,7 @@ mod tests {
                     },
                 ],
                 bot_guilds: vec![10],
+                ..Fake::default()
             }),
             limiter: Arc::new(RateLimiter::default()),
         })
@@ -1568,6 +2056,7 @@ mod tests {
                     name: "Staff".into(),
                 }],
                 bot_guilds: vec![10],
+                ..Fake::default()
             }),
             limiter: Arc::new(RateLimiter::default()),
         })
@@ -1830,6 +2319,7 @@ mod tests {
                     name: "Staff".into(),
                 }],
                 bot_guilds: vec![10],
+                ..Fake::default()
             }),
             limiter: Arc::new(RateLimiter::default()),
         };
@@ -1973,5 +2463,97 @@ mod tests {
             .await
             .unwrap();
         assert!(svg_body.starts_with(b"<svg"));
+    }
+
+    #[tokio::test]
+    async fn creating_a_channel_requires_manage_channels_and_is_audited() {
+        let db = crate::database::test_pool("dash-create").await;
+        session(&db).await;
+        let denied = router(AppState {
+            db: db.clone(),
+            cfg: dashboard_cfg(),
+            discord: Arc::new(Fake {
+                guilds: vec![UserGuild {
+                    id: 10,
+                    name: "Pixel Forge".into(),
+                    icon: None,
+                    owner: false,
+                    permissions: guard::MANAGE_GUILD,
+                }],
+                bot_guilds: vec![10],
+                access: Some(super::super::api::BotAccess {
+                    permissions: 0,
+                    highest_role_position: 5,
+                    bot_id: 1,
+                }),
+                ..Fake::default()
+            }),
+            limiter: Arc::new(RateLimiter::default()),
+        });
+        let denied = denied
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/servers/10/resources")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", "overlord_session=session-test")
+                    .body(Body::from(
+                        "csrf=csrf-token&resource=channel&target=mod_log_channel_id&name=mod-logs&kind=text",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+        let denied_html = String::from_utf8(
+            axum::body::to_bytes(denied.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(denied_html.contains("Manage Channels"));
+        assert!(crate::audit::list(&db, 10, 14, 20).await.unwrap().is_empty());
+
+        let allowed = router(AppState {
+            db: db.clone(),
+            cfg: dashboard_cfg(),
+            discord: Arc::new(Fake {
+                guilds: vec![UserGuild {
+                    id: 10,
+                    name: "Pixel Forge".into(),
+                    icon: None,
+                    owner: false,
+                    permissions: guard::MANAGE_GUILD,
+                }],
+                bot_guilds: vec![10],
+                access: Some(super::super::api::BotAccess {
+                    permissions: create::MANAGE_CHANNELS | create::MANAGE_ROLES,
+                    highest_role_position: 5,
+                    bot_id: 1,
+                }),
+                ..Fake::default()
+            }),
+            limiter: Arc::new(RateLimiter::default()),
+        });
+        let response = allowed
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/servers/10/resources")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", "overlord_session=session-test")
+                    .body(Body::from(
+                        "csrf=csrf-token&resource=channel&target=mod_log_channel_id&name=mod-logs&kind=text",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let settings = crate::guild_settings::load(&db, 10).await.unwrap();
+        assert_eq!(settings.mod_log_channel_id, Some(900));
+        let rows = crate::audit::list(&db, 10, 14, 20).await.unwrap();
+        assert!(rows.iter().any(|row| row.field == "Created channel" && row.new_value == "mod-logs"));
     }
 }

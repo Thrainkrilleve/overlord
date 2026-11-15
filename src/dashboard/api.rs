@@ -9,6 +9,7 @@ pub enum ChannelKind {
     Text,
     Voice,
     Category,
+    Forum,
     Other,
 }
 
@@ -64,6 +65,52 @@ pub trait DiscordApi: Send + Sync {
     async fn channels(&self, guild_id: u64) -> Result<Vec<ChannelChoice>, ApiError>;
     async fn roles(&self, guild_id: u64) -> Result<Vec<RoleChoice>, ApiError>;
     async fn display_name(&self, user_id: u64) -> Result<String, ApiError>;
+    async fn bot_access(&self, guild_id: u64) -> Result<BotAccess, ApiError>;
+    async fn create_channel(
+        &self,
+        guild_id: u64,
+        spec: &NewChannel,
+        reason: &str,
+    ) -> Result<ChannelChoice, ApiError>;
+    async fn create_role(
+        &self,
+        guild_id: u64,
+        spec: &NewRole,
+        reason: &str,
+    ) -> Result<RoleChoice, ApiError>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BotAccess {
+    pub permissions: u64,
+    pub highest_role_position: u32,
+    pub bot_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewChannel {
+    pub name: String,
+    pub kind: ChannelKind,
+    pub parent_id: Option<u64>,
+    pub private_overwrites: Vec<Overwrite>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Overwrite {
+    pub id: u64,
+    pub member: bool,
+    pub allow: u64,
+    pub deny: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewRole {
+    pub name: String,
+    pub color: u32,
+    pub hoist: bool,
+    pub mentionable: bool,
+    /// Placed strictly under the bot's highest role when that role is above @everyone.
+    pub position: Option<u32>,
 }
 
 pub struct LiveDiscord {
@@ -95,6 +142,28 @@ impl LiveDiscord {
             bot_token,
             names: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn bot_write(
+        &self,
+        method: &str,
+        url: &str,
+        body: serde_json::Value,
+        reason: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        let response = self
+            .http
+            .request(
+                method.parse().map_err(|_| ApiError::Unavailable)?,
+                url,
+            )
+            .header("Authorization", format!("Bot {}", self.bot_token))
+            .header("X-Audit-Log-Reason", reason)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| ApiError::Unavailable)?;
+        status_json(response).await
     }
 
     async fn bot_json(&self, url: &str) -> Result<serde_json::Value, ApiError> {
@@ -225,6 +294,7 @@ impl DiscordApi for LiveDiscord {
                         0 | 5 => ChannelKind::Text,
                         2 => ChannelKind::Voice,
                         4 => ChannelKind::Category,
+                        15 => ChannelKind::Forum,
                         _ => ChannelKind::Other,
                     },
                 })
@@ -256,6 +326,153 @@ impl DiscordApi for LiveDiscord {
             .collect();
         roles.sort_by_key(|role| role.name.to_lowercase());
         Ok(roles)
+    }
+
+    async fn bot_access(&self, guild_id: u64) -> Result<BotAccess, ApiError> {
+        let guild = self
+            .bot_json(&format!("https://discord.com/api/v10/guilds/{guild_id}"))
+            .await?;
+        let permissions = guild
+            .get("permissions")
+            .and_then(|value| value.as_str())
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+        let bot_id = self
+            .client_id
+            .parse()
+            .map_err(|_| ApiError::Unavailable)?;
+        let member = self
+            .bot_json(&format!(
+                "https://discord.com/api/v10/guilds/{guild_id}/members/{bot_id}"
+            ))
+            .await?;
+        let member_roles = member
+            .get("roles")
+            .and_then(|value| value.as_array())
+            .map(|roles| {
+                roles
+                    .iter()
+                    .filter_map(|role| role.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let roles = self
+            .bot_json(&format!("https://discord.com/api/v10/guilds/{guild_id}/roles"))
+            .await?;
+        let highest = roles
+            .as_array()
+            .map(|roles| {
+                roles
+                    .iter()
+                    .filter(|role| {
+                        role.get("id")
+                            .and_then(|id| id.as_str())
+                            .is_some_and(|id| member_roles.iter().any(|mine| mine == id))
+                    })
+                    .filter_map(|role| role.get("position").and_then(|pos| pos.as_u64()))
+                    .max()
+                    .unwrap_or(0) as u32
+            })
+            .unwrap_or(0);
+        Ok(BotAccess {
+            permissions,
+            highest_role_position: highest,
+            bot_id,
+        })
+    }
+
+    async fn create_channel(
+        &self,
+        guild_id: u64,
+        spec: &NewChannel,
+        reason: &str,
+    ) -> Result<ChannelChoice, ApiError> {
+        let kind = match spec.kind {
+            ChannelKind::Text => 0,
+            ChannelKind::Voice => 2,
+            ChannelKind::Category => 4,
+            ChannelKind::Forum => 15,
+            ChannelKind::Other => return Err(ApiError::Unavailable),
+        };
+        let mut body = serde_json::json!({
+            "name": spec.name,
+            "type": kind,
+        });
+        if let Some(parent) = spec.parent_id {
+            body["parent_id"] = serde_json::json!(parent.to_string());
+        }
+        if !spec.private_overwrites.is_empty() {
+            body["permission_overwrites"] = serde_json::json!(spec
+                .private_overwrites
+                .iter()
+                .map(|rule| serde_json::json!({
+                    "id": rule.id.to_string(),
+                    "type": if rule.member { 1 } else { 0 },
+                    "allow": rule.allow.to_string(),
+                    "deny": rule.deny.to_string(),
+                }))
+                .collect::<Vec<_>>());
+        }
+        let created = self
+            .bot_write(
+                "POST",
+                &format!("https://discord.com/api/v10/guilds/{guild_id}/channels"),
+                body,
+                reason,
+            )
+            .await?;
+        let id = created
+            .get("id")
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse().ok())
+            .ok_or(ApiError::Unavailable)?;
+        Ok(ChannelChoice {
+            id,
+            name: spec.name.clone(),
+            kind: spec.kind,
+        })
+    }
+
+    async fn create_role(
+        &self,
+        guild_id: u64,
+        spec: &NewRole,
+        reason: &str,
+    ) -> Result<RoleChoice, ApiError> {
+        let created = self
+            .bot_write(
+                "POST",
+                &format!("https://discord.com/api/v10/guilds/{guild_id}/roles"),
+                serde_json::json!({
+                    "name": spec.name,
+                    "permissions": "0",
+                    "color": spec.color,
+                    "hoist": spec.hoist,
+                    "mentionable": spec.mentionable,
+                }),
+                reason,
+            )
+            .await?;
+        let id: u64 = created
+            .get("id")
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse().ok())
+            .ok_or(ApiError::Unavailable)?;
+        if let Some(position) = spec.position {
+            let _ = self
+                .bot_write(
+                    "PATCH",
+                    &format!("https://discord.com/api/v10/guilds/{guild_id}/roles"),
+                    serde_json::json!([{ "id": id.to_string(), "position": position }]),
+                    reason,
+                )
+                .await;
+        }
+        Ok(RoleChoice {
+            id,
+            name: spec.name.clone(),
+        })
     }
 
     async fn display_name(&self, user_id: u64) -> Result<String, ApiError> {

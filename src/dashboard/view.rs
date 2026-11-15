@@ -245,6 +245,7 @@ pub fn app_page(shell: Shell<'_>) -> String {
 }
 
 pub fn overview_body(
+    guild_id: u64,
     stats: &WeekStats,
     rows: &[InfractionRow],
     names: &dyn Fn(u64) -> String,
@@ -301,7 +302,7 @@ pub fn overview_body(
       <h1>Overview</h1>
       <p class="lede">Activity and health for this server. Times follow your device.</p>
     </div>
-    <div class="head-actions"><span class="badge ok"><span class="dot"></span>Bot online</span></div>
+    <div class="head-actions"><a class="btn ghost" href="/servers/{guild_id}/layout">Set up recommended layout</a><span class="badge ok"><span class="dot"></span>Bot online</span></div>
   </div>
   <div class="stats">
     <div class="card stat"><div class="label">Infractions this week {icon_shield}</div><div class="value">{infra}</div><div class="{delta_class}">{delta_label}</div></div>
@@ -359,6 +360,7 @@ pub fn moderation_body(rows: &[InfractionRow], names: &dyn Fn(u64) -> String) ->
 }
 
 pub fn security_body(
+    guild_id: u64,
     settings: &GuildSettings,
     channels: &[ChannelChoice],
     roles: &[RoleChoice],
@@ -367,13 +369,12 @@ pub fn security_body(
     let age = settings.min_account_age_days.clamp(0, 3650);
     let age_max = age.max(14);
     format!(
-        r#"<form method="post" data-save class="main-form">
-<input type="hidden" name="csrf" value="{csrf}">
+        r#"<div class="main-form">
 <div class="main-inner">
   <div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Security</div><h1>Security &amp; Anti-raid</h1><p class="lede">Filters, join-surge detection, and the honeypot trap for this server only.</p></div><div class="head-actions"><span class="badge ok"><span class="dot"></span>Monitoring</span></div></div>
   <div class="settings-grid">
-    <div class="card field"><div class="field-label"><h3>Minimum account age</h3><span class="value-chip" data-age-out>{age} days</span></div><p class="field-help">Newer accounts, and those still using a default avatar, raise a staff alert in the mod log.</p><input data-age type="range" min="0" max="{age_max}" name="min_account_age_days" value="{age}" aria-label="Minimum account age in days"></div>
-    <div class="card field"><div class="field-label"><h3>Raid threshold</h3><span class="value-chip">{threshold} / {window}s</span></div><p class="field-help">A sliding window of joins. During a sustained raid, staff are alerted at most once a minute.</p><div class="input-row"><input class="num" type="number" min="2" max="50" name="raid_join_threshold" value="{threshold}" aria-label="Joins"><span class="muted">joins per</span><input class="num" type="number" min="5" max="120" name="raid_window_seconds" value="{window}" aria-label="Seconds"><span class="muted">seconds</span></div></div>
+    <div class="card field"><div class="field-label"><h3>Minimum account age</h3><span class="value-chip" data-age-out>{age} days</span></div><p class="field-help">Newer accounts, and those still using a default avatar, raise a staff alert in the mod log.</p><input form="settings" data-age type="range" min="0" max="{age_max}" name="min_account_age_days" value="{age}" aria-label="Minimum account age in days"></div>
+    <div class="card field"><div class="field-label"><h3>Raid threshold</h3><span class="value-chip">{threshold} / {window}s</span></div><p class="field-help">A sliding window of joins. During a sustained raid, staff are alerted at most once a minute.</p><div class="input-row"><input form="settings" class="num" type="number" min="2" max="50" name="raid_join_threshold" value="{threshold}" aria-label="Joins"><span class="muted">joins per</span><input form="settings" class="num" type="number" min="5" max="120" name="raid_window_seconds" value="{window}" aria-label="Seconds"><span class="muted">seconds</span></div></div>
     <div class="card field"><div class="field-label"><h3>Action on raid</h3></div><p class="field-help">What Overlord should do when the join threshold is crossed.</p><div class="seg">{segs}</div></div>
     <div class="card field"><div class="field-label"><h3>Unverified role</h3></div><p class="field-help">Granted on join and removed when a member passes the verification gate.</p>{unverified}</div>
     <div class="card field"><div class="field-label"><h3>Mod log channel</h3></div><p class="field-help">Raid alerts, honeypot hits, and account-age warnings are posted here.</p>{modlog}</div>
@@ -381,8 +382,7 @@ pub fn security_body(
   </div>
 </div>
 {savebar}
-</form>"#,
-        csrf = esc(csrf),
+</div>"#,
         threshold = settings.raid_threshold(),
         window = settings.raid_window_secs(),
         segs = segment(
@@ -394,37 +394,47 @@ pub fn security_body(
                 ("ban", "Ban new joins"),
             ],
         ),
-        unverified = select_roles("unverified_role_id", settings.unverified_role_id, roles),
+        unverified = select_roles(
+            "unverified_role_id",
+            settings.unverified_role_id,
+            roles,
+            guild_id,
+            csrf,
+        ),
         modlog = select_channels(
             "mod_log_channel_id",
             settings.mod_log_channel_id,
             channels,
             ChannelKind::Text,
+            guild_id,
+            csrf,
         ),
         honeypot_input = if settings.honeypot_enabled {
-            "<input type=\"checkbox\" name=\"honeypot_enabled\" value=\"1\" checked aria-label=\"Honeypot trap\">"
+            "<input form=\"settings\" type=\"checkbox\" name=\"honeypot_enabled\" value=\"1\" checked aria-label=\"Honeypot trap\">"
         } else {
-            "<input type=\"checkbox\" name=\"honeypot_enabled\" value=\"1\" aria-label=\"Honeypot trap\">"
+            "<input form=\"settings\" type=\"checkbox\" name=\"honeypot_enabled\" value=\"1\" aria-label=\"Honeypot trap\">"
         },
         honeypot = select_channels(
             "honeypot_channel_id",
             settings.honeypot_channel_id,
             channels,
             ChannelKind::Text,
+            guild_id,
+            csrf,
         ),
-        savebar = savebar(),
+        savebar = savebar(csrf),
     )
 }
 
 pub fn verification_body(
+    guild_id: u64,
     settings: &GuildSettings,
     channels: &[ChannelChoice],
     roles: &[RoleChoice],
     csrf: &str,
 ) -> String {
     format!(
-        r#"<form method="post" data-save class="main-form">
-<input type="hidden" name="csrf" value="{csrf}">
+        r#"<div class="main-form">
 <div class="main-inner">
   <div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Verification</div><h1>Verification</h1><p class="lede">The code gate for this server. Post the button with /setup_verification in the channel members can see before they verify.</p></div></div>
   <div class="settings-grid">
@@ -435,21 +445,35 @@ pub fn verification_body(
   </div>
 </div>
 {savebar}
-</form>"#,
-        csrf = esc(csrf),
+</div>"#,
         verify = select_channels(
             "verify_channel_id",
             settings.verify_channel_id,
             channels,
             ChannelKind::Text,
+            guild_id,
+            csrf,
         ),
-        member = select_roles("member_role_id", settings.member_role_id, roles),
-        unverified = select_roles("unverified_role_id", settings.unverified_role_id, roles),
-        savebar = savebar(),
+        member = select_roles(
+            "member_role_id",
+            settings.member_role_id,
+            roles,
+            guild_id,
+            csrf,
+        ),
+        unverified = select_roles(
+            "unverified_role_id",
+            settings.unverified_role_id,
+            roles,
+            guild_id,
+            csrf,
+        ),
+        savebar = savebar(csrf),
     )
 }
 
 pub fn tickets_body(
+    guild_id: u64,
     settings: &GuildSettings,
     channels: &[ChannelChoice],
     roles: &[RoleChoice],
@@ -470,7 +494,7 @@ pub fn tickets_body(
                     .map(|role| role.name.as_str())
                     .unwrap_or("role");
                 format!(
-                    "<span class=\"chip\"><span class=\"at\">@</span> {name}<input type=\"hidden\" name=\"staff_role\" value=\"{id}\"></span>",
+                    "<span class=\"chip\"><span class=\"at\">@</span> {name}<input form=\"settings\" type=\"hidden\" name=\"staff_role\" value=\"{id}\"></span>",
                     name = esc(name),
                 )
             })
@@ -478,8 +502,7 @@ pub fn tickets_body(
             .join("")
     };
     format!(
-        r#"<form method="post" data-save class="main-form">
-<input type="hidden" name="csrf" value="{csrf}">
+        r#"<div class="main-form">
 <div class="main-inner">
   <div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Tickets</div><h1>Tickets</h1><p class="lede">Where new tickets are created, who can claim them, and where transcripts are archived.</p></div><div class="head-actions"><span class="muted">Post the panel in Discord with <span class="hash inherit">/setup_tickets</span></span></div></div>
   <div class="row-2 tickets-layout">
@@ -487,42 +510,45 @@ pub fn tickets_body(
       <div class="card field"><div class="field-label"><h3>Ticket category</h3></div><p class="field-help">New ticket channels are created under this category, with access limited to the opener and staff.</p>{category}</div>
       <div class="card field"><div class="field-label"><h3>Transcript channel</h3></div><p class="field-help">When a ticket is closed, Overlord uploads a timestamped transcript here, then deletes the channel.</p>{transcript}</div>
       <div class="card field"><div class="field-label"><h3>Staff roles</h3></div><p class="field-help">These roles can claim, close, and read every ticket. Members only see their own.</p><div class="chips">{chips}</div><label class="chip add">Add a role {add}</label></div>
-      <div class="card field"><div class="field-label"><h3>Max open tickets per user</h3></div><p class="field-help">Prevents channel spam. The ticket panel offers General Support, Report User / Scam, and VIP / Roles.</p><input class="num" type="number" min="1" max="5" name="max_open_tickets" value="{max}" aria-label="Max open tickets per user"></div>
+      <div class="card field"><div class="field-label"><h3>Max open tickets per user</h3></div><p class="field-help">Prevents channel spam. The ticket panel offers General Support, Report User / Scam, and VIP / Roles.</p><input form="settings" class="num" type="number" min="1" max="5" name="max_open_tickets" value="{max}" aria-label="Max open tickets per user"></div>
     </div>
     <aside class="card preview-card"><div class="card-head"><h2>Ticket panel preview</h2></div><div class="card-body"><div class="preview-title">{mark} <strong>Overlord</strong> <span class="badge quiet">Bot</span></div><h3>Open a support ticket</h3><p class="muted">Choose a category and tell us what's going on. A private channel will be created for you and the staff team.</p><div class="tbtn">General Support</div><div class="tbtn">Report User / Scam</div><div class="tbtn">VIP / Roles</div><p class="muted preview-note">Posted in the help channel with <span class="hash inherit">/setup_tickets</span>.</p><div class="preview-stats"><div><strong>{open_now}</strong><div class="muted">Open now</div></div><div><strong>{closed_week}</strong><div class="muted">Closed this week</div></div></div></div></aside>
   </div>
 </div>
 {savebar}
-</form>"#,
-        csrf = esc(csrf),
+</div>"#,
         category = select_channels(
             "ticket_category_id",
             settings.ticket_category_id,
             channels,
             ChannelKind::Category,
+            guild_id,
+            csrf,
         ),
         transcript = select_channels(
             "transcript_channel_id",
             settings.transcript_channel_id,
             channels,
             ChannelKind::Text,
+            guild_id,
+            csrf,
         ),
-        add = select_roles("staff_role", None, roles),
+        add = select_roles("staff_role", None, roles, guild_id, csrf),
         max = settings.max_tickets(),
         mark = mark("mark sm"),
-        savebar = savebar(),
+        savebar = savebar(csrf),
     )
 }
 
 pub fn voice_body(
+    guild_id: u64,
     settings: &GuildSettings,
     channels: &[ChannelChoice],
     rooms: i64,
     csrf: &str,
 ) -> String {
     format!(
-        r#"<form method="post" data-save class="main-form">
-<input type="hidden" name="csrf" value="{csrf}">
+        r#"<div class="main-form">
 <div class="main-inner">
   <div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Temp Voice</div><h1>Temp voice</h1><p class="lede">Join-to-create rooms for this server. {rooms} temporary rooms are open right now.</p></div></div>
   <div class="settings-grid">
@@ -531,21 +557,24 @@ pub fn voice_body(
   </div>
 </div>
 {savebar}
-</form>"#,
-        csrf = esc(csrf),
+</div>"#,
         join = select_channels(
             "join_to_create_channel_id",
             settings.join_to_create_channel_id,
             channels,
             ChannelKind::Voice,
+            guild_id,
+            csrf,
         ),
         category = select_channels(
             "voice_category_id",
             settings.voice_category_id,
             channels,
             ChannelKind::Category,
+            guild_id,
+            csrf,
         ),
-        savebar = savebar(),
+        savebar = savebar(csrf),
     )
 }
 
@@ -640,8 +669,11 @@ pub fn invite_url(client_id: &str, permissions: u64, guild_id: Option<u64>) -> S
     url
 }
 
-fn savebar() -> &'static str {
-    r#"<div class="savebar is-hidden" data-savebar><span class="pulse"></span><div class="msg">Unsaved changes</div><button type="reset" data-discard class="btn ghost">Discard</button><button type="submit" class="btn primary">Save changes</button></div>"#
+fn savebar(csrf: &str) -> String {
+    format!(
+        r#"<form method="post" data-save id="settings"><input type="hidden" name="csrf" value="{csrf}"><div class="savebar is-hidden" data-savebar><span class="pulse"></span><div class="msg">Unsaved changes</div><button type="reset" data-discard class="btn ghost">Discard</button><button type="submit" class="btn primary">Save changes</button></div></form>"#,
+        csrf = esc(csrf),
+    )
 }
 
 fn document_head(title: &str) -> String {
@@ -892,29 +924,39 @@ fn select_channels(
     current: Option<u64>,
     channels: &[ChannelChoice],
     kind: ChannelKind,
+    guild_id: u64,
+    csrf: &str,
 ) -> String {
+    let prefix = if kind == ChannelKind::Category { "" } else { "#" };
     let mut html = format!(
-        "<label class=\"sr\" for=\"{name}\">{name}</label><select class=\"field-select\" id=\"{name}\" name=\"{name}\"><option value=\"\">Not set</option>"
+        "<label class=\"sr\" for=\"{name}\">{name}</label><select form=\"settings\" class=\"field-select\" id=\"{name}\" name=\"{name}\"><option value=\"\">Not set</option>"
     );
-    for channel in channels.iter().filter(|channel| channel.kind == kind) {
+    for channel in channels.iter().filter(|channel| super::create::channel_fits(channel.kind, kind)) {
         let selected = if current == Some(channel.id) {
             " selected"
         } else {
             ""
         };
         html.push_str(&format!(
-            "<option value=\"{id}\"{selected}>#{label}</option>",
+            "<option value=\"{id}\"{selected}>{prefix}{label}</option>",
             id = channel.id,
             label = esc(&channel.name),
         ));
     }
     html.push_str("</select>");
+    html.push_str(&create_channel_form(name, kind, guild_id, csrf, channels));
     html
 }
 
-fn select_roles(name: &str, current: Option<u64>, roles: &[RoleChoice]) -> String {
+fn select_roles(
+    name: &str,
+    current: Option<u64>,
+    roles: &[RoleChoice],
+    guild_id: u64,
+    csrf: &str,
+) -> String {
     let mut html = format!(
-        "<label class=\"sr\" for=\"{name}\">{name}</label><select class=\"field-select\" id=\"{name}\" name=\"{name}\"><option value=\"\">Not set</option>"
+        "<label class=\"sr\" for=\"{name}\">{name}</label><select form=\"settings\" class=\"field-select\" id=\"{name}\" name=\"{name}\"><option value=\"\">Not set</option>"
     );
     for role in roles {
         let selected = if current == Some(role.id) {
@@ -929,7 +971,76 @@ fn select_roles(name: &str, current: Option<u64>, roles: &[RoleChoice]) -> Strin
         ));
     }
     html.push_str("</select>");
+    html.push_str(&create_role_form(name, guild_id, csrf));
     html
+}
+
+fn create_channel_form(
+    target: &str,
+    kind: ChannelKind,
+    guild_id: u64,
+    csrf: &str,
+    channels: &[ChannelChoice],
+) -> String {
+    let summary = if kind == ChannelKind::Category {
+        "Create category"
+    } else {
+        "Create channel"
+    };
+    let types: String = match kind {
+        ChannelKind::Voice => "<input type=\"hidden\" name=\"kind\" value=\"voice\">".into(),
+        ChannelKind::Category => "<input type=\"hidden\" name=\"kind\" value=\"category\">".into(),
+        _ => "<label>Type <select name=\"kind\"><option value=\"text\">Text</option><option value=\"forum\">Forum</option></select></label>".into(),
+    };
+    let parents = if kind == ChannelKind::Category {
+        String::new()
+    } else {
+        let mut html = String::from("<label>Category <select name=\"parent_id\"><option value=\"\">No category</option>");
+        for channel in channels.iter().filter(|channel| channel.kind == ChannelKind::Category) {
+            html.push_str(&format!(
+                "<option value=\"{id}\">{name}</option>",
+                id = channel.id,
+                name = esc(&channel.name),
+            ));
+        }
+        html.push_str("</select></label><label>Or new category <input type=\"text\" name=\"category_name\" maxlength=\"100\"></label>");
+        if kind != ChannelKind::Voice {
+            html.push_str("<label class=\"checkline\"><input type=\"checkbox\" name=\"private\" value=\"1\"> Private to staff and Overlord</label>");
+        }
+        html
+    };
+    format!(
+        r#"<details class="create-box"><summary>{summary}</summary><form class="create-grid" method="post" action="/servers/{guild_id}/resources"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="resource" value="channel"><input type="hidden" name="target" value="{target}"><label>Name <input type="text" name="name" maxlength="100" required></label>{types}{parents}<button class="btn ghost" type="submit">{summary}</button></form></details>"#,
+        csrf = esc(csrf),
+    )
+}
+
+fn create_role_form(target: &str, guild_id: u64, csrf: &str) -> String {
+    format!(
+        r#"<details class="create-box"><summary>Create role</summary><form class="create-grid" method="post" action="/servers/{guild_id}/resources"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="resource" value="role"><input type="hidden" name="target" value="{target}"><label>Name <input type="text" name="name" maxlength="100" required></label><label>Color <input type="color" name="color" value='#99aab5'></label><label class="checkline"><input type="checkbox" name="hoist" value="1"> Show separately</label><label class="checkline"><input type="checkbox" name="mentionable" value="1"> Allow anyone to mention</label><button class="btn ghost" type="submit">Create role</button></form></details>"#,
+        csrf = esc(csrf),
+    )
+}
+
+pub fn layout_body(
+    guild_id: u64,
+    plan: &[super::create::LayoutItem],
+    channels: &[ChannelChoice],
+    roles: &[RoleChoice],
+    csrf: &str,
+) -> String {
+    let mut rows = String::new();
+    for item in plan {
+        rows.push_str(&format!(
+            "<tr><td>{label}</td><td>{action}</td></tr>",
+            label = esc(item.label),
+            action = esc(&super::create::describe(&item.action, channels, roles)),
+        ));
+    }
+    format!(
+        r#"<div class="main-inner"><div class="page-head"><div><div class="crumbs"><a href="/servers/{guild_id}">Overview</a> <span class="sep">/</span> Layout</div><h1>Set up recommended layout</h1><p class="lede">Overlord will create only what is missing, then assign it. Anything already saved is left in place.</p></div></div><section class="card stretch"><div class="card-body flush"><table class="grid"><thead><tr><th>Setting</th><th>Plan</th></tr></thead><tbody>{rows}</tbody></table></div></section><form method="post" data-save><input type="hidden" name="csrf" value="{csrf}"><div class="savebar"><span class="pulse"></span><div class="msg">Create the missing channels and roles</div><button class="btn primary" type="submit">Create and assign</button></div></form></div>"#,
+        csrf = esc(csrf),
+    )
 }
 
 fn segment(name: &str, current: &str, options: &[(&str, &str)]) -> String {
@@ -938,7 +1049,7 @@ fn segment(name: &str, current: &str, options: &[(&str, &str)]) -> String {
         .map(|(value, label)| {
             let checked = if *value == current { " checked" } else { "" };
             format!(
-                "<label><input type=\"radio\" name=\"{name}\" value=\"{value}\"{checked}><span>{label}</span></label>",
+                "<label><input form=\"settings\" type=\"radio\" name=\"{name}\" value=\"{value}\"{checked}><span>{label}</span></label>",
                 label = esc(label),
             )
         })
@@ -1183,21 +1294,21 @@ mod tests {
                 "overview.html",
                 app_page(shell(
                     Nav::Overview,
-                    overview_body(&stats, &[], &|id| id.to_string(), &settings),
+                    overview_body(10, &stats, &[], &|id| id.to_string(), &settings),
                 )),
             ),
             (
                 "security.html",
                 app_page(shell(
                     Nav::Security,
-                    security_body(&settings, &channels, &roles, "token"),
+                    security_body(10, &settings, &channels, &roles, "token"),
                 )),
             ),
             (
                 "tickets.html",
                 app_page(shell(
                     Nav::Tickets,
-                    tickets_body(&settings, &channels, &roles, 1, 3, "token"),
+                    tickets_body(10, &settings, &channels, &roles, 1, 3, "token"),
                 )),
             ),
             (
