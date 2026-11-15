@@ -92,7 +92,11 @@ pub fn router(state: AppState) -> Router {
         .route("/servers/:guild_id/voice", get(voice).post(save_voice))
         .route("/servers/:guild_id/logs", get(logs))
         .route("/servers/:guild_id/audit", get(audit_page))
+        .route("/assets/app.css", get(css))
         .route("/assets/dashboard.css", get(css))
+        .route("/assets/fonts/Geist-Variable.ttf", get(font_geist))
+        .route("/assets/fonts/Geist-Italic.ttf", get(font_geist_italic))
+        .route("/assets/fonts/GeistMono-Variable.woff2", get(font_mono))
         .route("/assets/dashboard.js", get(js))
         .route("/favicon.ico", get(favicon_ico))
         .route("/favicon.svg", get(favicon_svg))
@@ -843,7 +847,31 @@ async fn css() -> Response {
             (header::CONTENT_TYPE, "text/css; charset=utf-8"),
             (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
-        include_str!("dashboard.css"),
+        include_str!("app.css"),
+    )
+        .into_response()
+}
+
+async fn font_geist() -> Response {
+    font_response("font/ttf", include_bytes!("fonts/Geist-Variable.ttf"))
+}
+
+async fn font_geist_italic() -> Response {
+    font_response("font/ttf", include_bytes!("fonts/Geist-Italic.ttf"))
+}
+
+async fn font_mono() -> Response {
+    font_response("font/woff2", include_bytes!("fonts/GeistMono-Variable.woff2"))
+}
+
+fn font_response(content_type: &'static str, bytes: &'static [u8]) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
     )
         .into_response()
 }
@@ -1547,7 +1575,7 @@ mod tests {
 
     fn settings_csrf(html: &str) -> String {
         let start = html
-            .find("<form method=\"post\" data-save>")
+            .find("<form method=\"post\" data-save")
             .expect("settings form");
         let form = &html[start..];
         let end = form.find("</form>").expect("form end");
@@ -1858,7 +1886,7 @@ mod tests {
         let css = router(state.clone())
             .oneshot(
                 Request::builder()
-                    .uri("/assets/dashboard.css")
+                    .uri("/assets/app.css")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1872,7 +1900,8 @@ mod tests {
         )
         .unwrap();
         assert!(css_body.contains("@media (max-width: 980px)"));
-        assert!(css_body.contains(".tabbar"));
+        assert!(css_body.contains(".m-tabbar"));
+        assert!(css_body.contains("font-family: \"Geist\""));
         let missing = router(state.clone())
             .oneshot(
                 Request::builder()
