@@ -92,6 +92,8 @@ pub fn router(state: AppState) -> Router {
         .route("/servers/:guild_id/audit", get(audit_page))
         .route("/assets/dashboard.css", get(css))
         .route("/assets/dashboard.js", get(js))
+        .route("/favicon.ico", get(favicon_ico))
+        .route("/favicon.svg", get(favicon_svg))
         .layer(from_fn_with_state(limited, limit_requests))
         .layer(from_fn_with_state(secure, secure_headers))
         .with_state(state)
@@ -115,7 +117,7 @@ async fn secure_headers(
     insert(
         headers,
         "content-security-policy",
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://cdn.discordapp.com; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        guard::CONTENT_SECURITY_POLICY,
     );
     if state.cfg.cookie_secure {
         insert(
@@ -795,6 +797,30 @@ async fn save_voice(
     .await
 }
 
+async fn favicon_ico() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/x-icon"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_bytes!("favicon.ico").as_slice(),
+    )
+        .into_response()
+}
+
+async fn favicon_svg() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_str!("favicon.svg"),
+    )
+        .into_response()
+}
+
 async fn css() -> Response {
     (
         StatusCode::OK,
@@ -1308,5 +1334,193 @@ mod tests {
         assert!(rows.iter().any(|row| row.field == "Mod log channel" && row.new_value == "#mod-logs"));
         assert!(rows.iter().all(|row| row.username == "maple_admin"));
         assert!(crate::audit::list(&db, 11, 14, 20).await.unwrap().is_empty());
+    }
+
+    fn assert_no_inline_active_content(html: &str) {
+        let lower = html.to_ascii_lowercase();
+        assert!(!lower.contains("style="), "style attribute in {html}");
+        assert!(!lower.contains("<style"), "style element in page");
+        let mut rest = html;
+        while let Some(index) = rest.find("<script") {
+            let tag = &rest[index..];
+            let end = tag.find('>').expect("script tag");
+            let open = &tag[..=end];
+            let external = open.contains("src=");
+            let nonce = open.contains("nonce=");
+            assert!(
+                external || nonce,
+                "inline script without a nonce: {open}"
+            );
+            rest = &tag[end + 1..];
+        }
+    }
+
+    #[tokio::test]
+    async fn every_page_matches_the_csp_and_has_no_inline_styles_or_scripts() {
+        let db = crate::database::test_pool("csp-pages").await;
+        let session = session(&db).await;
+        let state = AppState {
+            db,
+            cfg: dashboard_cfg(),
+            discord: Arc::new(Fake {
+                guilds: vec![UserGuild {
+                    id: 10,
+                    name: "Pixel Forge".into(),
+                    icon: None,
+                    owner: false,
+                    permissions: guard::MANAGE_GUILD,
+                }],
+                channels: vec![super::super::api::ChannelChoice {
+                    id: 555,
+                    name: "mod-logs".into(),
+                    kind: super::super::api::ChannelKind::Text,
+                }],
+                roles: vec![super::super::api::RoleChoice {
+                    id: 20,
+                    name: "Staff".into(),
+                }],
+                bot_guilds: vec![10],
+            }),
+            limiter: Arc::new(RateLimiter::default()),
+        };
+        let cookie = format!("overlord_session={}", session.id);
+        let pages = [
+            ("/", None),
+            ("/servers", Some(cookie.as_str())),
+            ("/servers/10", Some(cookie.as_str())),
+            ("/servers/10/moderation", Some(cookie.as_str())),
+            ("/servers/10/security", Some(cookie.as_str())),
+            ("/servers/10/verification", Some(cookie.as_str())),
+            ("/servers/10/tickets", Some(cookie.as_str())),
+            ("/servers/10/voice", Some(cookie.as_str())),
+            ("/servers/10/logs", Some(cookie.as_str())),
+            ("/servers/10/audit", Some(cookie.as_str())),
+        ];
+        for (path, cookie) in pages {
+            let mut builder = Request::builder().uri(path);
+            if let Some(cookie) = cookie {
+                builder = builder.header("cookie", cookie);
+            }
+            let response = router(state.clone())
+                .oneshot(builder.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-security-policy")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                guard::CONTENT_SECURITY_POLICY,
+                "{path}"
+            );
+            let policy = guard::CONTENT_SECURITY_POLICY;
+            assert!(policy.contains("script-src 'self'"));
+            assert!(policy.contains("style-src 'self'"));
+            assert!(policy.contains("form-action 'self'"));
+            assert!(!policy.contains("unsafe-inline"));
+            assert!(!policy.contains("unsafe-eval"));
+            assert!(!policy.contains("cloudflareinsights"));
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let html = String::from_utf8(body.to_vec()).unwrap();
+            assert_no_inline_active_content(&html);
+            assert!(html.contains("/favicon.svg"), "{path}");
+            if path.starts_with("/servers/10") {
+                assert!(html.contains("tabbar"), "{path} mobile nav");
+            }
+        }
+        let css = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/dashboard.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let css_body = String::from_utf8(
+            axum::body::to_bytes(css.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(css_body.contains("@media (max-width: 980px)"));
+        assert!(css_body.contains(".tabbar"));
+        let missing = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/servers/99")
+                    .header("cookie", cookie.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            missing
+                .headers()
+                .get("content-security-policy")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            guard::CONTENT_SECURITY_POLICY
+        );
+        let missing_html = String::from_utf8(
+            axum::body::to_bytes(missing.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_no_inline_active_content(&missing_html);
+        assert!(missing_html.contains("/favicon.ico"));
+        let login = router(state.clone())
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let login_html = String::from_utf8(
+            axum::body::to_bytes(login.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(login_html.contains("href=\"/auth/discord\""));
+        assert!(!login_html.contains("<form"));
+
+        let icon = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/favicon.ico")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(icon.status(), StatusCode::OK);
+        assert_eq!(
+            icon.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/x-icon"
+        );
+        let svg = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/favicon.svg")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(svg.status(), StatusCode::OK);
+        let svg_body = axum::body::to_bytes(svg.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(svg_body.starts_with(b"<svg"));
     }
 }

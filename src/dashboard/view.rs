@@ -37,14 +37,7 @@ pub fn login_page(flash: Option<&str>) -> String {
         .unwrap_or_default();
     format!(
         r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>Sign in · Overlord</title>
-<link rel="stylesheet" href="/assets/dashboard.css">
-</head>
+<html lang="en">{head}
 <body class="login-body">
 <div class="login-split">
   <section class="login-hero">
@@ -61,22 +54,23 @@ pub fn login_page(flash: Option<&str>) -> String {
     <div class="hero-mark" aria-hidden="true">{mark_lg}</div>
   </section>
   <section class="login-panel">
-    <form class="signin" method="get" action="/auth/discord">
+    <div class="signin">
       <h2>Sign in</h2>
       <p class="muted">Use your Discord account. You'll only see servers where you have the Manage Server permission.</p>
       {flash}
-      <button class="discord-btn" type="submit">{icon_discord} Continue with Discord</button>
+      <a class="discord-btn" href="/auth/discord">{icon_discord} Continue with Discord</a>
       <div class="secure-rule"><span>Secure sign-in</span></div>
       <div class="secure-note">{icon_shield} <p>Overlord never posts one server's logs, tickets, or raid alerts into another. Each community keeps its own settings.</p></div>
       <p class="fine">By continuing, you authorize Overlord to read your server list and apply the settings you save.</p>
-    </form>
+    </div>
     <footer class="login-foot"><span>Overlord dashboard</span><span>Sessions stay on this server</span></footer>
   </section>
 </div>
 </body>
 </html>"#,
-        mark_sm = mark(22),
-        mark_lg = mark(220),
+        head = document_head("Sign in · Overlord"),
+        mark_sm = mark("mark mark-sm"),
+        mark_lg = mark("mark mark-lg"),
         icon_shield = icon_shield(),
         icon_ticket = icon_ticket(),
         icon_doc = icon_doc(),
@@ -132,7 +126,7 @@ pub fn servers_page(
         .count();
     format!(
         r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Servers · Overlord</title><link rel="stylesheet" href="/assets/dashboard.css"></head>
+<html lang="en">{head}
 <body>
 <header class="topbar"><a class="brand" href="/servers">{mark} <span>Overlord</span></a><div class="who">{avatar_html}<div><strong>{user}</strong><p class="muted">Signed in with Discord</p></div></div></header>
 <main class="picker">
@@ -144,9 +138,10 @@ pub fn servers_page(
 </main>
 <script src="/assets/dashboard.js"></script>
 </body></html>"#,
+        head = document_head("Servers · Overlord"),
         user = esc(username),
         count = guilds.len(),
-        mark = mark(20),
+        mark = mark("mark mark-20"),
         avatar_html = avatar_html(user_id, avatar, username),
     )
 }
@@ -178,7 +173,7 @@ pub fn app_page(shell: Shell<'_>) -> String {
         .join("");
     format!(
         r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>{title} · {guild} · Overlord</title><link rel="stylesheet" href="/assets/dashboard.css"></head>
+<html lang="en">{head}
 <body class="app">
 <aside class="sidebar">
   <a class="brand" href="/servers">{mark} <span>Overlord</span></a>
@@ -195,9 +190,13 @@ pub fn app_page(shell: Shell<'_>) -> String {
 <nav class="tabbar">{mobile}</nav>
 <script src="/assets/dashboard.js"></script>
 </body></html>"#,
-        title = esc(section_name(shell.nav)),
+        head = document_head(&format!(
+            "{} · {} · Overlord",
+            section_name(shell.nav),
+            shell.guild_name
+        )),
         guild = esc(shell.guild_name),
-        mark = mark(18),
+        mark = mark("mark mark-18"),
         initials = esc(&initials(shell.guild_name)),
         avatar = avatar_html(shell.user_id, shell.avatar, shell.username),
         user = esc(shell.username),
@@ -315,7 +314,7 @@ pub fn security_body(
   <section class="panel"><h2>Mod log channel</h2><p class="muted">Raid alerts, honeypot hits, and account-age warnings are posted here.</p>{modlog}</section>
   <section class="panel"><header><h2>Honeypot trap</h2><label class="switch"><input type="checkbox" name="honeypot_enabled" value="1" {checked}><span></span></label></header><p class="muted">Anyone who posts in the trap channel is banned and purged. Staff test posts are deleted and logged, never banned.</p>{honeypot}</section>
 </div>
-<div class="savebar" data-savebar hidden><span>Unsaved changes</span><div><button type="reset" data-discard class="ghost">Discard</button><button type="submit" class="gold">Save changes</button></div></div>
+<div class="savebar is-hidden" data-savebar><span>Unsaved changes</span><div><button type="reset" data-discard class="ghost">Discard</button><button type="submit" class="gold">Save changes</button></div></div>
 </form>"#,
         csrf = esc(csrf),
         threshold = settings.raid_threshold(),
@@ -366,7 +365,7 @@ pub fn verification_body(
   <section class="panel"><h2>Unverified role</h2><p class="muted">Given on join and removed after a successful check.</p>{unverified}</section>
   <section class="panel"><h2>How the gate works</h2><p class="muted">Each person gets a one-time code in this server, valid for 5 minutes. A code from another server does not work here.</p></section>
 </div>
-<div class="savebar" data-savebar hidden><span>Unsaved changes</span><div><button type="reset" data-discard class="ghost">Discard</button><button type="submit" class="gold">Save changes</button></div></div>
+<div class="savebar is-hidden" data-savebar><span>Unsaved changes</span><div><button type="reset" data-discard class="ghost">Discard</button><button type="submit" class="gold">Save changes</button></div></div>
 </form>"#,
         csrf = esc(csrf),
         verify = select_channels(
@@ -410,7 +409,7 @@ pub fn tickets_body(
 <section class="panel"><h2>Transcript channel</h2><p class="muted">When a ticket is closed, Overlord uploads a timestamped transcript here, then deletes the channel.</p>{transcript}</section>
 <section class="panel"><h2>Staff roles</h2><p class="muted">These roles can claim, close, and read every ticket. Members only see their own.</p><div class="chips">{chips}</div><label class="add-role">Add a role {add}</label></section>
 <section class="panel"><h2>Max open tickets per user</h2><p class="muted">Prevents channel spam. The ticket panel offers General Support, Report User / Scam, and VIP / Roles.</p><input type="number" min="1" max="5" name="max_open_tickets" value="{max}"></section>
-<div class="savebar" data-savebar hidden><span>Unsaved changes</span><div><button type="reset" data-discard class="ghost">Discard</button><button type="submit" class="gold">Save changes</button></div></div>
+<div class="savebar is-hidden" data-savebar><span>Unsaved changes</span><div><button type="reset" data-discard class="ghost">Discard</button><button type="submit" class="gold">Save changes</button></div></div>
 </form>
 <aside class="panel preview"><p class="eyebrow">Ticket panel preview</p><div class="preview-card"><div class="preview-title">{mark} <strong>Overlord</strong> <span class="pill">Bot</span></div><h3>Open a support ticket</h3><p class="muted">Choose a category and tell us what's going on. A private channel will be created for you and the staff team.</p><div class="preview-btn">General Support</div><div class="preview-btn">Report User / Scam</div><div class="preview-btn">VIP / Roles</div><p class="fine">Posted in the help channel with /setup_tickets.</p></div><footer class="preview-stats"><span><strong>{open_now}</strong><small>Open now</small></span><span><strong>{closed_week}</strong><small>Closed this week</small></span></footer></aside>
 </div>"#,
@@ -429,7 +428,7 @@ pub fn tickets_body(
         ),
         add = select_roles("staff_role", None, roles),
         max = settings.max_tickets(),
-        mark = mark(16),
+        mark = mark("mark mark-16"),
     )
 }
 
@@ -447,7 +446,7 @@ pub fn voice_body(
   <section class="panel"><h2>Join-to-create channel</h2><p class="muted">A member who joins this voice channel is moved into their own room.</p>{join}</section>
   <section class="panel"><h2>Voice category</h2><p class="muted">New rooms are created under this category. A category from another server is ignored.</p>{category}</section>
 </div>
-<div class="savebar" data-savebar hidden><span>Unsaved changes</span><div><button type="reset" data-discard class="ghost">Discard</button><button type="submit" class="gold">Save changes</button></div></div>
+<div class="savebar is-hidden" data-savebar><span>Unsaved changes</span><div><button type="reset" data-discard class="ghost">Discard</button><button type="submit" class="gold">Save changes</button></div></div>
 </form>"#,
         csrf = esc(csrf),
         join = select_channels(
@@ -526,7 +525,8 @@ pub fn audit_body(rows: &[AuditRow], days: i64, guild_name: &str) -> String {
 
 pub fn message_page(title: &str, body: &str) -> String {
     format!(
-        r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title><link rel="stylesheet" href="/assets/dashboard.css"></head><body class="login-body"><main class="signin"><h2>{title}</h2><p>{body}</p><p><a href="/">Back to sign in</a></p></main></body></html>"#,
+        r#"<!DOCTYPE html><html lang="en">{head}<body class="login-body"><main class="signin"><h2>{title}</h2><p>{body}</p><p><a href="/">Back to sign in</a></p></main></body></html>"#,
+        head = document_head(title),
         title = esc(title),
         body = esc(body),
     )
@@ -727,26 +727,41 @@ fn avatar_html(user_id: u64, avatar: Option<&str>, name: &str) -> String {
     }
 }
 
-fn mark(size: u32) -> String {
+fn document_head(title: &str) -> String {
     format!(
-        r#"<svg class="mark" width="{size}" height="{size}" viewBox="0 0 64 64" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="3" d="M32 6 54 16v16c0 14-9 22-22 26C19 54 10 46 10 32V16Z"/><circle cx="32" cy="30" r="7" fill="none" stroke="currentColor" stroke-width="3"/><circle cx="32" cy="30" r="2.5" fill="currentColor"/></svg>"#
+        r#"<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{}</title>
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/dashboard.css">
+</head>"#,
+        esc(title)
+    )
+}
+
+fn mark(class: &str) -> String {
+    format!(
+        r#"<svg class="{class}" viewBox="0 0 64 64" aria-hidden="true"><path d="M32 6 54 16v16c0 14-9 22-22 26C19 54 10 46 10 32V16Z"/><circle cx="32" cy="30" r="7"/><circle class="pupil" cx="32" cy="30" r="2.5"/></svg>"#
     )
 }
 
 fn icon_shield() -> &'static str {
-    r#"<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3 20 7v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7Z"/></svg>"#
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7Z"/></svg>"#
 }
 
 fn icon_ticket() -> &'static str {
-    r#"<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-4Z"/></svg>"#
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-4Z"/></svg>"#
 }
 
 fn icon_doc() -> &'static str {
-    r#"<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v6h6"/></svg>"#
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v6h6"/></svg>"#
 }
 
 fn icon_discord() -> &'static str {
-    r#"<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19.3 5.2A17 17 0 0 0 15 4l-.4.8a15 15 0 0 1 4 1.6 16 16 0 0 0-13.2 0A15 15 0 0 1 9.4 4.8L9 4a17 17 0 0 0-4.3 1.2C2.2 8.6 1.5 12 1.8 15.3A17 17 0 0 0 7 18l.8-1.1a11 11 0 0 1-1.6-.8l.4-.3c3.2 1.5 6.6 1.5 9.8 0l.4.3a11 11 0 0 1-1.6.8l.8 1.1a17 17 0 0 0 5.2-2.7c.5-3.8-.6-7.1-2.9-10.1ZM9.2 14.2c-.9 0-1.6-.8-1.6-1.8s.7-1.8 1.6-1.8 1.7.8 1.6 1.8-.7 1.8-1.6 1.8Zm5.6 0c-.9 0-1.6-.8-1.6-1.8s.7-1.8 1.6-1.8 1.7.8 1.6 1.8-.7 1.8-1.6 1.8Z"/></svg>"#
+    r#"<svg class="icon icon-solid" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.3 5.2A17 17 0 0 0 15 4l-.4.8a15 15 0 0 1 4 1.6 16 16 0 0 0-13.2 0A15 15 0 0 1 9.4 4.8L9 4a17 17 0 0 0-4.3 1.2C2.2 8.6 1.5 12 1.8 15.3A17 17 0 0 0 7 18l.8-1.1a11 11 0 0 1-1.6-.8l.4-.3c3.2 1.5 6.6 1.5 9.8 0l.4.3a11 11 0 0 1-1.6.8l.8 1.1a17 17 0 0 0 5.2-2.7c.5-3.8-.6-7.1-2.9-10.1ZM9.2 14.2c-.9 0-1.6-.8-1.6-1.8s.7-1.8 1.6-1.8 1.7.8 1.6 1.8-.7 1.8-1.6 1.8Zm5.6 0c-.9 0-1.6-.8-1.6-1.8s.7-1.8 1.6-1.8 1.7.8 1.6 1.8-.7 1.8-1.6 1.8Z"/></svg>"#
 }
 
 #[cfg(test)]
@@ -789,7 +804,9 @@ mod tests {
     fn login_page_offers_discord() {
         let html = login_page(Some("Sign-in was cancelled."));
         assert!(html.contains("Continue with Discord"));
+        assert!(html.contains("href=\"/auth/discord\""));
+        assert!(!html.contains("action=\"/auth/discord\""));
+        assert!(!html.contains("<form"));
         assert!(html.contains("Sign-in was cancelled."));
-        assert!(html.contains("/auth/discord"));
     }
 }
