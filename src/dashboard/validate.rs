@@ -313,7 +313,7 @@ fn require_channel(
         return Ok(None);
     };
     match channels.iter().find(|channel| channel.id == id) {
-        Some(channel) if channel.kind == kind => Ok(Some(id)),
+        Some(channel) if super::create::channel_fits(channel.kind, kind) => Ok(Some(id)),
         Some(_) => Err("That channel is the wrong type for this setting."),
         None => Err("That channel is not in this server."),
     }
