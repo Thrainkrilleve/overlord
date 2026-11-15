@@ -109,7 +109,7 @@ Replace `overlord.example.com` with the hostname your tunnel serves. Do not comm
 
 ### Self-host with Docker and a Cloudflare Tunnel
 
-The container does not publish the dashboard on the public internet. `docker-compose.yml` binds `127.0.0.1:8080` only.
+The container does not publish the dashboard on the public internet. `docker-compose.yml` binds `127.0.0.1` only. The host port is `DASHBOARD_HOST_PORT` (default `8080`). Change it in `.env` when 8080 is already taken. Inside the container the process still listens on `8080`.
 
 ```bash
 cp .env.example .env
@@ -118,13 +118,13 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-Point a Cloudflare Tunnel at the loopback port:
+Point a Cloudflare Tunnel at the loopback port. With the default `DASHBOARD_HOST_PORT`:
 
 ```bash
 cloudflared tunnel --url http://127.0.0.1:8080
 ```
 
-For a named tunnel, the public hostname is whatever you configure in Cloudflare (for example `https://overlord.example.com`) and the origin is `http://127.0.0.1:8080`. If `cloudflared` runs as another container on the compose network, use `http://overlord:8080` and you can drop the host port. Set `DASHBOARD_TRUST_CLOUDFLARE=true` only when that tunnel is the only client, so rate limits use `CF-Connecting-IP`.
+If you set `DASHBOARD_HOST_PORT=8081`, use `http://127.0.0.1:8081` instead. For a named tunnel, the public hostname is whatever you configure in Cloudflare (for example `https://overlord.example.com`) and the origin is that same loopback URL. If `cloudflared` runs as another container on the compose network, use `http://overlord:8080` (the port inside the container, not `DASHBOARD_HOST_PORT`) and you can drop the host port. Set `DASHBOARD_TRUST_CLOUDFLARE=true` only when that tunnel is the only client, so rate limits use `CF-Connecting-IP`.
 
 In the Discord Developer Portal:
 

@@ -196,7 +196,8 @@ the server the command or event happened in.
 
 The dashboard is off until you set `DASHBOARD_ENABLED=true`. It runs in the same process and the
 same `./data/overlord.db`, so a saved setting is what the bot uses on the next event. Do not open
-port 8080 on your router. Put it behind a Cloudflare Tunnel.
+the dashboard port on your router. Put it behind a Cloudflare Tunnel. The host side stays on
+`127.0.0.1`.
 
 1. In the [Discord Developer Portal](https://discord.com/developers/applications), open your
    application → **OAuth2**. Add a redirect:
@@ -221,19 +222,23 @@ DASHBOARD_DISCORD_CLIENT_SECRET=your-oauth-client-secret
 DASHBOARD_COOKIE_SECURE=true
 DASHBOARD_TRUST_CLOUDFLARE=true
 DASHBOARD_INVITE_PERMISSIONS=1099798014998
+# Host port on 127.0.0.1. Leave 8080, or change it when that port is already taken.
+DASHBOARD_HOST_PORT=8080
 ```
 
-4. Point the tunnel at the dashboard. `docker-compose.yml` publishes `127.0.0.1:8080` only, so a
-   tunnel running on the same machine uses `http://127.0.0.1:8080`. A tunnel container on the
-   compose network uses `http://overlord:8080` and does not need the host port.
+4. Point the tunnel at the dashboard. `docker-compose.yml` publishes
+   `127.0.0.1:${DASHBOARD_HOST_PORT:-8080}` only. A tunnel on the same machine uses
+   `http://127.0.0.1:8080`, or `http://127.0.0.1:<DASHBOARD_HOST_PORT>` when you changed it.
+   A tunnel container on the compose network uses `http://overlord:8080` (the port inside the
+   container) and does not need the host port.
    Set `DASHBOARD_TRUST_CLOUDFLARE=true` only when that tunnel is the only way in. It tells the
    rate limiter to read `CF-Connecting-IP`. Leave it false if anything else can reach the process.
 5. Restart: `docker compose up -d --build`. Sign in with **Continue with Discord**. You only see
    servers where you have Manage Server. Saving a form checks that permission again, checks that
    each channel and role belongs to that server, and writes an audit row.
 
-`DASHBOARD_COOKIE_SECURE=false` is only for a local `http://127.0.0.1:8080` trial. The tunnel
-deployment stays `true`.
+`DASHBOARD_COOKIE_SECURE=false` is only for a local trial at `http://127.0.0.1:<DASHBOARD_HOST_PORT>`
+(default `http://127.0.0.1:8080`). The tunnel deployment stays `true`.
 
 ## Troubleshooting
 
