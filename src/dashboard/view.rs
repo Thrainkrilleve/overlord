@@ -141,7 +141,7 @@ pub fn servers_page(
   <div class="servers-inner">
     <div class="page-head">
       <div>
-        <div class="crumbs">Home <span class="sep">/</span> Servers</div>
+        {crumbs}
         <h1>Select a server</h1>
         <p class="lede">Only servers where you have Manage Server are listed. Invite Overlord to any others you own or moderate.</p>
       </div>
@@ -160,6 +160,7 @@ pub fn servers_page(
         mark = mark("mark sm"),
         avatar = person_face(user_id, avatar, username, "avatar sm"),
         user = esc(username),
+        crumbs = crumbs(None, "Servers"),
         icon_search = icon_search(),
         icon_plus = icon_plus(),
         count = guilds.len(),
@@ -246,6 +247,7 @@ pub fn app_page(shell: Shell<'_>) -> String {
 
 pub fn overview_body(
     guild_id: u64,
+    guild_name: &str,
     stats: &WeekStats,
     rows: &[InfractionRow],
     names: &dyn Fn(u64) -> String,
@@ -298,7 +300,7 @@ pub fn overview_body(
         r#"<div class="main-inner">
   <div class="page-head">
     <div>
-      <div class="crumbs">Servers <span class="sep">/</span> This server <span class="sep">/</span> Overview</div>
+      {crumbs}
       <h1>Overview</h1>
       <p class="lede">Activity and health for this server. Times follow your device.</p>
     </div>
@@ -320,6 +322,7 @@ pub fn overview_body(
     </div></section>
   </div>
 </div>"#,
+        crumbs = crumbs(Some((guild_id, guild_name)), "Overview"),
         icon_shield = icon_shield(),
         icon_ticket = icon_ticket(),
         icon_alert = icon_alert(),
@@ -339,7 +342,12 @@ pub fn overview_body(
     )
 }
 
-pub fn moderation_body(rows: &[InfractionRow], names: &dyn Fn(u64) -> String) -> String {
+pub fn moderation_body(
+    guild_id: u64,
+    guild_name: &str,
+    rows: &[InfractionRow],
+    names: &dyn Fn(u64) -> String,
+) -> String {
     let table = if rows.is_empty() {
         "<p class=\"empty-note\">No cases yet. Moderators still use /warn, /timeout, /kick, and /ban in Discord. Cases show up here.</p>".into()
     } else {
@@ -355,12 +363,14 @@ pub fn moderation_body(rows: &[InfractionRow], names: &dyn Fn(u64) -> String) ->
         html
     };
     format!(
-        r#"<div class="main-inner"><div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Moderation</div><h1>Moderation</h1><p class="lede">Case history for this server. Actions are still taken in Discord so a browser session cannot ban someone by itself.</p></div></div><section class="card stretch"><div class="card-body flush">{table}</div></section></div>"#
+        r#"<div class="main-inner"><div class="page-head"><div>{crumbs}<h1>Moderation</h1><p class="lede">Case history for this server. Actions are still taken in Discord so a browser session cannot ban someone by itself.</p></div></div><section class="card stretch"><div class="card-body flush">{table}</div></section></div>"#,
+        crumbs = crumbs(Some((guild_id, guild_name)), "Moderation"),
     )
 }
 
 pub fn security_body(
     guild_id: u64,
+    guild_name: &str,
     settings: &GuildSettings,
     channels: &[ChannelChoice],
     roles: &[RoleChoice],
@@ -371,7 +381,7 @@ pub fn security_body(
     format!(
         r#"<div class="main-form">
 <div class="main-inner">
-  <div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Security</div><h1>Security &amp; Anti-raid</h1><p class="lede">Filters, join-surge detection, and the honeypot trap for this server only.</p></div><div class="head-actions"><span class="badge ok"><span class="dot"></span>Monitoring</span></div></div>
+  <div class="page-head"><div>{crumbs}<h1>Security &amp; Anti-raid</h1><p class="lede">Filters, join-surge detection, and the honeypot trap for this server only.</p></div><div class="head-actions"><span class="badge ok"><span class="dot"></span>Monitoring</span></div></div>
   <div class="settings-grid">
     <div class="card field"><div class="field-label"><h3>Minimum account age</h3><span class="value-chip" data-age-out>{age} days</span></div><p class="field-help">Newer accounts, and those still using a default avatar, raise a staff alert in the mod log.</p><input form="settings" data-age type="range" min="0" max="{age_max}" name="min_account_age_days" value="{age}" aria-label="Minimum account age in days"></div>
     <div class="card field"><div class="field-label"><h3>Raid threshold</h3><span class="value-chip">{threshold} / {window}s</span></div><p class="field-help">A sliding window of joins. During a sustained raid, staff are alerted at most once a minute.</p><div class="input-row"><input form="settings" class="num" type="number" min="2" max="50" name="raid_join_threshold" value="{threshold}" aria-label="Joins"><span class="muted">joins per</span><input form="settings" class="num" type="number" min="5" max="120" name="raid_window_seconds" value="{window}" aria-label="Seconds"><span class="muted">seconds</span></div></div>
@@ -383,6 +393,7 @@ pub fn security_body(
 </div>
 {savebar}
 </div>"#,
+        crumbs = crumbs(Some((guild_id, guild_name)), "Security & Anti-raid"),
         threshold = settings.raid_threshold(),
         window = settings.raid_window_secs(),
         segs = segment(
@@ -428,6 +439,7 @@ pub fn security_body(
 
 pub fn verification_body(
     guild_id: u64,
+    guild_name: &str,
     settings: &GuildSettings,
     channels: &[ChannelChoice],
     roles: &[RoleChoice],
@@ -436,7 +448,7 @@ pub fn verification_body(
     format!(
         r#"<div class="main-form">
 <div class="main-inner">
-  <div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Verification</div><h1>Verification</h1><p class="lede">The code gate for this server. Post the button with /setup_verification in the channel members can see before they verify.</p></div></div>
+  <div class="page-head"><div>{crumbs}<h1>Verification</h1><p class="lede">The code gate for this server. Post the button with /setup_verification in the channel members can see before they verify.</p></div></div>
   <div class="settings-grid">
     <div class="card field"><div class="field-label"><h3>Verify channel</h3></div><p class="field-help">Shown in /security_status. The button can live here.</p>{verify}</div>
     <div class="card field"><div class="field-label"><h3>Member role</h3></div><p class="field-help">Granted when the code matches. Without it, a correct code tells the member to contact staff.</p>{member}</div>
@@ -446,6 +458,7 @@ pub fn verification_body(
 </div>
 {savebar}
 </div>"#,
+        crumbs = crumbs(Some((guild_id, guild_name)), "Verification"),
         verify = select_channels(
             "verify_channel_id",
             settings.verify_channel_id,
@@ -472,8 +485,10 @@ pub fn verification_body(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn tickets_body(
     guild_id: u64,
+    guild_name: &str,
     settings: &GuildSettings,
     channels: &[ChannelChoice],
     roles: &[RoleChoice],
@@ -504,7 +519,7 @@ pub fn tickets_body(
     format!(
         r#"<div class="main-form">
 <div class="main-inner">
-  <div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Tickets</div><h1>Tickets</h1><p class="lede">Where new tickets are created, who can claim them, and where transcripts are archived.</p></div><div class="head-actions"><span class="muted">Post the panel in Discord with <span class="hash inherit">/setup_tickets</span></span></div></div>
+  <div class="page-head"><div>{crumbs}<h1>Tickets</h1><p class="lede">Where new tickets are created, who can claim them, and where transcripts are archived.</p></div><div class="head-actions"><span class="muted">Post the panel in Discord with <span class="hash inherit">/setup_tickets</span></span></div></div>
   <div class="row-2 tickets-layout">
     <div class="tickets-col">
       <div class="card field"><div class="field-label"><h3>Ticket category</h3></div><p class="field-help">New ticket channels are created under this category, with access limited to the opener and staff.</p>{category}</div>
@@ -517,6 +532,7 @@ pub fn tickets_body(
 </div>
 {savebar}
 </div>"#,
+        crumbs = crumbs(Some((guild_id, guild_name)), "Tickets"),
         category = select_channels(
             "ticket_category_id",
             settings.ticket_category_id,
@@ -542,6 +558,7 @@ pub fn tickets_body(
 
 pub fn voice_body(
     guild_id: u64,
+    guild_name: &str,
     settings: &GuildSettings,
     channels: &[ChannelChoice],
     rooms: i64,
@@ -550,7 +567,7 @@ pub fn voice_body(
     format!(
         r#"<div class="main-form">
 <div class="main-inner">
-  <div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Temp Voice</div><h1>Temp voice</h1><p class="lede">Join-to-create rooms for this server. {rooms} temporary rooms are open right now.</p></div></div>
+  <div class="page-head"><div>{crumbs}<h1>Temp voice</h1><p class="lede">Join-to-create rooms for this server. {rooms} temporary rooms are open right now.</p></div></div>
   <div class="settings-grid">
     <div class="card field"><div class="field-label"><h3>Join-to-create channel</h3></div><p class="field-help">A member who joins this voice channel is moved into their own room.</p>{join}</div>
     <div class="card field"><div class="field-label"><h3>Voice category</h3></div><p class="field-help">New rooms are created under this category. A category from another server is ignored.</p>{category}</div>
@@ -558,6 +575,7 @@ pub fn voice_body(
 </div>
 {savebar}
 </div>"#,
+        crumbs = crumbs(Some((guild_id, guild_name)), "Temp Voice"),
         join = select_channels(
             "join_to_create_channel_id",
             settings.join_to_create_channel_id,
@@ -579,6 +597,8 @@ pub fn voice_body(
 }
 
 pub fn logs_body(
+    guild_id: u64,
+    guild_name: &str,
     rows: &[InfractionRow],
     raids: &[(String, String)],
     names: &dyn Fn(u64) -> String,
@@ -608,11 +628,12 @@ pub fn logs_body(
         html
     };
     format!(
-        r#"<div class="main-inner"><div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Logs</div><h1>Logs</h1><p class="lede">Moderation cases and raid alerts stored for this server. Channel messages themselves stay in Discord.</p></div></div><div class="row-2"><section class="card"><div class="card-head"><h2>Raid alerts</h2></div>{raids_html}</section><section class="card"><div class="card-head"><h2>Cases</h2></div><div class="card-body flush">{cases}</div></section></div></div>"#
+        r#"<div class="main-inner"><div class="page-head"><div>{crumbs}<h1>Logs</h1><p class="lede">Moderation cases and raid alerts stored for this server. Channel messages themselves stay in Discord.</p></div></div><div class="row-2"><section class="card"><div class="card-head"><h2>Raid alerts</h2></div>{raids_html}</section><section class="card"><div class="card-head"><h2>Cases</h2></div><div class="card-body flush">{cases}</div></section></div></div>"#,
+        crumbs = crumbs(Some((guild_id, guild_name)), "Logs"),
     )
 }
 
-pub fn audit_body(rows: &[AuditRow], days: i64, guild_name: &str) -> String {
+pub fn audit_body(guild_id: u64, rows: &[AuditRow], days: i64, guild_name: &str) -> String {
     let body = if rows.is_empty() {
         "<p class=\"empty-note\">No dashboard changes in this window.</p>".into()
     } else {
@@ -637,10 +658,11 @@ pub fn audit_body(rows: &[AuditRow], days: i64, guild_name: &str) -> String {
     };
     format!(
         r#"<div class="main-inner">
-  <div class="page-head"><div><div class="crumbs">Servers <span class="sep">/</span> Audit log</div><h1>Audit log</h1><p class="lede">Dashboard changes for this server. Times follow your device. {guild} only — no other servers.</p></div>
+  <div class="page-head"><div>{crumbs}<h1>Audit log</h1><p class="lede">Dashboard changes for this server. Times follow your device. {guild} only — no other servers.</p></div>
   <form class="head-actions filters" method="get"><label class="sr" for="days">Window</label><select class="field-select auto" id="days" name="days"><option value="1" {d1}>Last 24 hours</option><option value="7" {d7}>Last 7 days</option><option value="14" {d14}>Last 14 days</option><option value="30" {d30}>Last 30 days</option></select><button class="btn ghost" type="submit">Apply</button></form></div>
   <section class="card stretch"><div class="card-head"><h2>{count} changes</h2><span class="muted">{guild} only · no other servers</span></div><div class="card-body flush">{body}</div></section>
 </div>"#,
+        crumbs = crumbs(Some((guild_id, guild_name)), "Audit log"),
         guild = esc(guild_name),
         d1 = if days == 1 { "selected" } else { "" },
         d7 = if days == 7 { "selected" } else { "" },
@@ -674,6 +696,22 @@ fn savebar(csrf: &str) -> String {
         r#"<form method="post" data-save id="settings"><input type="hidden" name="csrf" value="{csrf}"><div class="savebar is-hidden" data-savebar><span class="pulse"></span><div class="msg">Unsaved changes</div><button type="reset" data-discard class="btn ghost">Discard</button><button type="submit" class="btn primary">Save changes</button></div></form>"#,
         csrf = esc(csrf),
     )
+}
+
+fn crumbs(server: Option<(u64, &str)>, current: &str) -> String {
+    let mut items = String::new();
+    if let Some((guild_id, guild_name)) = server {
+        items.push_str("<li><a href=\"/servers\">Servers</a></li>");
+        items.push_str(&format!(
+            "<li><a href=\"/servers/{guild_id}\">{}</a></li>",
+            esc(guild_name)
+        ));
+    }
+    items.push_str(&format!(
+        "<li aria-current=\"page\">{}</li>",
+        esc(current)
+    ));
+    format!(r#"<nav class="crumbs" aria-label="Breadcrumb"><ol>{items}</ol></nav>"#)
 }
 
 fn document_head(title: &str) -> String {
@@ -1024,6 +1062,7 @@ fn create_role_form(target: &str, guild_id: u64, csrf: &str) -> String {
 
 pub fn layout_body(
     guild_id: u64,
+    guild_name: &str,
     plan: &[super::create::LayoutItem],
     channels: &[ChannelChoice],
     roles: &[RoleChoice],
@@ -1038,7 +1077,8 @@ pub fn layout_body(
         ));
     }
     format!(
-        r#"<div class="main-inner"><div class="page-head"><div><div class="crumbs"><a href="/servers/{guild_id}">Overview</a> <span class="sep">/</span> Layout</div><h1>Set up recommended layout</h1><p class="lede">Overlord will create only what is missing, then assign it. Anything already saved is left in place.</p></div></div><section class="card stretch"><div class="card-body flush"><table class="grid"><thead><tr><th>Setting</th><th>Plan</th></tr></thead><tbody>{rows}</tbody></table></div></section><form method="post" data-save><input type="hidden" name="csrf" value="{csrf}"><div class="savebar"><span class="pulse"></span><div class="msg">Create the missing channels and roles</div><button class="btn primary" type="submit">Create and assign</button></div></form></div>"#,
+        r#"<div class="main-inner"><div class="page-head"><div>{crumbs}<h1>Set up recommended layout</h1><p class="lede">Overlord will create only what is missing, then assign it. Anything already saved is left in place.</p></div></div><section class="card stretch"><div class="card-body flush"><table class="grid"><thead><tr><th>Setting</th><th>Plan</th></tr></thead><tbody>{rows}</tbody></table></div></section><form method="post" data-save><input type="hidden" name="csrf" value="{csrf}"><div class="savebar"><span class="pulse"></span><div class="msg">Create the missing channels and roles</div><button class="btn primary" type="submit">Create and assign</button></div></form></div>"#,
+        crumbs = crumbs(Some((guild_id, guild_name)), "Layout"),
         csrf = esc(csrf),
     )
 }
@@ -1294,31 +1334,77 @@ mod tests {
                 "overview.html",
                 app_page(shell(
                     Nav::Overview,
-                    overview_body(10, &stats, &[], &|id| id.to_string(), &settings),
+                    overview_body(10, "Pixel Forge", &stats, &[], &|id| id.to_string(), &settings),
                 )),
             ),
             (
                 "security.html",
                 app_page(shell(
                     Nav::Security,
-                    security_body(10, &settings, &channels, &roles, "token"),
+                    security_body(10, "Pixel Forge", &settings, &channels, &roles, "token"),
                 )),
             ),
             (
                 "tickets.html",
                 app_page(shell(
                     Nav::Tickets,
-                    tickets_body(10, &settings, &channels, &roles, 1, 3, "token"),
+                    tickets_body(10, "Pixel Forge", &settings, &channels, &roles, 1, 3, "token"),
                 )),
             ),
             (
                 "audit.html",
-                app_page(shell(Nav::Audit, audit_body(&[], 14, "Pixel Forge"))),
+                app_page(shell(Nav::Audit, audit_body(10, &[], 14, "Pixel Forge"))),
             ),
         ];
         for (name, html) in files {
             std::fs::write(format!("{dir}/{name}"), html).unwrap();
         }
+    }
+
+    #[test]
+    fn settings_breadcrumbs_link_the_server_list_and_overview() {
+        let settings = GuildSettings::unconfigured(10);
+        let channels = Vec::new();
+        let roles = Vec::new();
+        let name = "Thrain's server";
+        let pages = [
+            security_body(10, name, &settings, &channels, &roles, "token"),
+            verification_body(10, name, &settings, &channels, &roles, "token"),
+            tickets_body(10, name, &settings, &channels, &roles, 0, 0, "token"),
+            voice_body(10, name, &settings, &channels, 0, "token"),
+            moderation_body(10, name, &[], &|id| id.to_string()),
+            logs_body(10, name, &[], &[], &|id| id.to_string()),
+            audit_body(10, &[], 14, name),
+            overview_body(
+                10,
+                name,
+                &WeekStats {
+                    infractions_this_week: 0,
+                    infractions_last_week: 0,
+                    open_tickets: 0,
+                    claimed_tickets: 0,
+                    closed_this_week: 0,
+                    raid_alerts_this_week: 0,
+                    last_raid_at: None,
+                    temp_rooms: 0,
+                },
+                &[],
+                &|id| id.to_string(),
+                &settings,
+            ),
+        ];
+        for html in pages {
+            assert!(html.contains("aria-label=\"Breadcrumb\""));
+            assert!(html.contains("<ol>"));
+            assert!(html.contains("href=\"/servers\""));
+            assert!(html.contains("href=\"/servers/10\""));
+            assert!(html.contains("aria-current=\"page\""));
+            assert!(html.contains("Thrain&#39;s server"));
+            assert!(!html.to_ascii_lowercase().contains("style="));
+        }
+        let list = servers_page(&[], &[], &[], "mod", None, 1, None);
+        assert!(list.contains("aria-current=\"page\">Servers"));
+        assert!(!list.contains("href=\"/servers/10\""));
     }
 
     #[test]

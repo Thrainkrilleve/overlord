@@ -462,6 +462,7 @@ async fn overview(
         |ctx| {
             let state = ctx.state.clone();
             let settings = ctx.settings.clone();
+            let guild_name = ctx.guild_name.clone();
             Box::pin(async move {
                 let stats =
                     store::week_stats(&state.db, guild_id)
@@ -482,6 +483,7 @@ async fn overview(
                 let names = lookup_names(&state, &rows).await;
                 view::overview_body(
                     guild_id,
+                    &guild_name,
                     &stats,
                     &rows,
                     &|id| names.get(&id).cloned().unwrap_or_else(|| id.to_string()),
@@ -500,12 +502,13 @@ async fn moderation(
 ) -> Response {
     page(&state, &headers, guild_id, Nav::Moderation, None, |ctx| {
         let state = ctx.state.clone();
+        let guild_name = ctx.guild_name.clone();
         Box::pin(async move {
             let rows = store::recent_infractions(&state.db, guild_id, 40)
                 .await
                 .unwrap_or_default();
             let names = lookup_names(&state, &rows).await;
-            view::moderation_body(&rows, &|id| {
+            view::moderation_body(guild_id, &guild_name, &rows, &|id| {
                 names.get(&id).cloned().unwrap_or_else(|| id.to_string())
             })
         })
@@ -529,10 +532,11 @@ async fn security(
             let state = ctx.state.clone();
             let settings = ctx.settings.clone();
             let csrf = ctx.session.csrf_token.clone();
+            let guild_name = ctx.guild_name.clone();
             Box::pin(async move {
                 let channels = state.discord.channels(guild_id).await.unwrap_or_default();
                 let roles = state.discord.roles(guild_id).await.unwrap_or_default();
-                view::security_body(guild_id, &settings, &channels, &roles, &csrf)
+                view::security_body(guild_id, &guild_name, &settings, &channels, &roles, &csrf)
             })
         },
     )
@@ -555,10 +559,11 @@ async fn verification(
             let state = ctx.state.clone();
             let settings = ctx.settings.clone();
             let csrf = ctx.session.csrf_token.clone();
+            let guild_name = ctx.guild_name.clone();
             Box::pin(async move {
                 let channels = state.discord.channels(guild_id).await.unwrap_or_default();
                 let roles = state.discord.roles(guild_id).await.unwrap_or_default();
-                view::verification_body(guild_id, &settings, &channels, &roles, &csrf)
+                view::verification_body(guild_id, &guild_name, &settings, &channels, &roles, &csrf)
             })
         },
     )
@@ -581,12 +586,14 @@ async fn tickets(
             let state = ctx.state.clone();
             let settings = ctx.settings.clone();
             let csrf = ctx.session.csrf_token.clone();
+            let guild_name = ctx.guild_name.clone();
             Box::pin(async move {
                 let channels = state.discord.channels(guild_id).await.unwrap_or_default();
                 let roles = state.discord.roles(guild_id).await.unwrap_or_default();
                 let stats = store::week_stats(&state.db, guild_id).await.ok();
                 view::tickets_body(
                     guild_id,
+                    &guild_name,
                     &settings,
                     &channels,
                     &roles,
@@ -616,13 +623,14 @@ async fn voice(
             let state = ctx.state.clone();
             let settings = ctx.settings.clone();
             let csrf = ctx.session.csrf_token.clone();
+            let guild_name = ctx.guild_name.clone();
             Box::pin(async move {
                 let channels = state.discord.channels(guild_id).await.unwrap_or_default();
                 let rooms = store::week_stats(&state.db, guild_id)
                     .await
                     .map(|s| s.temp_rooms)
                     .unwrap_or(0);
-                view::voice_body(guild_id, &settings, &channels, rooms, &csrf)
+                view::voice_body(guild_id, &guild_name, &settings, &channels, rooms, &csrf)
             })
         },
     )
@@ -636,13 +644,14 @@ async fn logs(
 ) -> Response {
     page(&state, &headers, guild_id, Nav::Logs, None, |ctx| {
         let state = ctx.state.clone();
+        let guild_name = ctx.guild_name.clone();
         Box::pin(async move {
             let rows = store::recent_infractions(&state.db, guild_id, 30)
                 .await
                 .unwrap_or_default();
             let names = lookup_names(&state, &rows).await;
             let raids = raid_lines(&state.db, guild_id).await;
-            view::logs_body(&rows, &raids, &|id| {
+            view::logs_body(guild_id, &guild_name, &rows, &raids, &|id| {
                 names.get(&id).cloned().unwrap_or_else(|| id.to_string())
             })
         })
@@ -670,7 +679,7 @@ async fn audit_page(
                 let rows = audit::list(&state.db, guild_id, days, 50)
                     .await
                     .unwrap_or_default();
-                view::audit_body(&rows, days.clamp(1, 90), &name)
+                view::audit_body(guild_id, &rows, days.clamp(1, 90), &name)
             })
         },
     )
@@ -1008,11 +1017,12 @@ async fn layout_page(
         let state = ctx.state.clone();
         let settings = ctx.settings.clone();
         let csrf = ctx.session.csrf_token.clone();
+        let guild_name = ctx.guild_name.clone();
         Box::pin(async move {
             let channels = state.discord.channels(guild_id).await.unwrap_or_default();
             let roles = state.discord.roles(guild_id).await.unwrap_or_default();
             let plan = create::recommended_layout(&settings, &channels, &roles);
-            view::layout_body(guild_id, &plan, &channels, &roles, &csrf)
+            view::layout_body(guild_id, &guild_name, &plan, &channels, &roles, &csrf)
         })
     })
     .await
