@@ -109,10 +109,10 @@ pub fn servers_page(
             "Finish setup"
         };
         cards.push_str(&format!(
-            r#"<a class="server-card" data-server="{key}" href="{href}">{badge}<div class="server-main"><span class="avatar solid">{initials}</span><div><strong>{name}</strong><p class="muted">Manage Server</p></div></div><span class="card-action">{action} <span aria-hidden="true">›</span></span></a>"#,
+            r#"<a class="server-card" data-server="{key}" href="{href}">{badge}<div class="server-main">{avatar}<div><strong>{name}</strong><p class="muted">Manage Server</p></div></div><span class="card-action">{action} <span aria-hidden="true">›</span></span></a>"#,
             key = esc(&guild.name.to_lowercase()),
             href = esc(&href),
-            initials = esc(&initials(&guild.name)),
+            avatar = guild_avatar(guild.id, &guild.name, guild.icon.as_deref(), "avatar", 36),
             name = esc(&guild.name),
         ));
     }
@@ -157,6 +157,11 @@ pub fn app_page(shell: Shell<'_>) -> String {
         .flash
         .map(|text| format!("<p class=\"flash\">{text}</p>"))
         .unwrap_or_default();
+    let current_icon = shell
+        .guilds
+        .iter()
+        .find(|guild| guild.id == shell.guild_id)
+        .and_then(|guild| guild.icon.as_deref());
     let switcher = shell
         .guilds
         .iter()
@@ -164,26 +169,35 @@ pub fn app_page(shell: Shell<'_>) -> String {
         .take(12)
         .map(|guild| {
             format!(
-                r#"<a href="/servers/{id}">{name}</a>"#,
+                r#"<a href="/servers/{id}">{avatar}<span>{name}</span></a>"#,
                 id = guild.id,
+                avatar = guild_avatar(guild.id, &guild.name, guild.icon.as_deref(), "avatar", 36),
                 name = esc(&guild.name)
             )
         })
         .collect::<Vec<_>>()
         .join("");
+    let summary_avatar = guild_avatar(shell.guild_id, shell.guild_name, current_icon, "avatar", 36);
+    let crumb_avatar = guild_avatar(
+        shell.guild_id,
+        shell.guild_name,
+        current_icon,
+        "avatar avatar-crumb",
+        16,
+    );
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">{head}
 <body class="app">
 <aside class="sidebar">
   <a class="brand" href="/servers">{mark} <span>Overlord</span></a>
-  <details class="switcher"><summary><span class="avatar solid">{initials}</span><span><strong>{guild}</strong><small class="muted">Manage Server</small></span></summary><div class="switcher-menu"><a href="/servers">All servers</a>{switcher}</div></details>
+  <details class="switcher"><summary>{summary_avatar}<span><strong>{guild}</strong><small class="muted">Manage Server</small></span></summary><div class="switcher-menu"><a href="/servers">All servers</a>{switcher}</div></details>
   <p class="nav-label">Manage</p>
   <nav class="sidenav">{nav}</nav>
   <div class="sidebar-user">{avatar}<div><strong>{user}</strong><p class="muted">Server manager</p></div><form method="post" action="/logout"><input type="hidden" name="csrf" value="{csrf}"><button class="icon-btn" type="submit" title="Sign out">↪</button></form></div>
 </aside>
 <div class="content">
-  <header class="content-head"><p class="crumbs">Servers / {guild} / {section}</p><div class="head-pills"><span class="pill ok">Bot online</span>{badge}</div></header>
+  <header class="content-head"><p class="crumbs">Servers / {crumb_avatar} {guild} / {section}</p><div class="head-pills"><span class="pill ok">Bot online</span>{badge}</div></header>
   {flash}
   {body}
 </div>
@@ -197,7 +211,8 @@ pub fn app_page(shell: Shell<'_>) -> String {
         )),
         guild = esc(shell.guild_name),
         mark = mark("mark mark-18"),
-        initials = esc(&initials(shell.guild_name)),
+        summary_avatar = summary_avatar,
+        crumb_avatar = crumb_avatar,
         avatar = avatar_html(shell.user_id, shell.avatar, shell.username),
         user = esc(shell.username),
         section = esc(section_name(shell.nav)),
@@ -701,6 +716,50 @@ fn relative(sqlite: &str) -> String {
     }
 }
 
+struct GuildIconUrls {
+    png: String,
+    gif: Option<String>,
+}
+
+/// Discord CDN icon for a guild. Animated hashes (`a_…`) use a GIF, with the PNG kept as the static frame.
+fn guild_icon_urls(guild_id: u64, hash: Option<&str>) -> Option<GuildIconUrls> {
+    let hash = hash.map(str::trim).filter(|hash| valid_icon_hash(hash))?;
+    let png = format!("https://cdn.discordapp.com/icons/{guild_id}/{hash}.png?size=128");
+    let gif = hash
+        .starts_with("a_")
+        .then(|| format!("https://cdn.discordapp.com/icons/{guild_id}/{hash}.gif?size=128"));
+    Some(GuildIconUrls { png, gif })
+}
+
+fn valid_icon_hash(hash: &str) -> bool {
+    !hash.is_empty()
+        && hash.len() <= 64
+        && hash
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn guild_avatar(guild_id: u64, name: &str, icon: Option<&str>, class: &str, size: u16) -> String {
+    let Some(urls) = guild_icon_urls(guild_id, icon) else {
+        return format!(
+            "<span class=\"{class} solid\">{}</span>",
+            esc(&initials(name))
+        );
+    };
+    let img = format!(
+        "<img class=\"{class}\" src=\"{}\" alt=\"{}\" width=\"{size}\" height=\"{size}\" loading=\"lazy\">",
+        esc(&urls.png),
+        esc(name)
+    );
+    match urls.gif {
+        Some(gif) => format!(
+            "<picture class=\"{class}\"><source srcset=\"{}\" type=\"image/gif\">{img}</picture>",
+            esc(&gif)
+        ),
+        None => img,
+    }
+}
+
 fn initials(name: &str) -> String {
     let mut letters = String::new();
     for word in name.split_whitespace() {
@@ -798,6 +857,101 @@ mod tests {
         let targeted = invite_url("123", 99, Some(55));
         assert!(targeted.contains("guild_id=55"));
         assert!(targeted.contains("disable_guild_select=true"));
+    }
+
+    #[test]
+    fn guild_icon_urls_cover_static_animated_and_missing() {
+        let static_icon = guild_icon_urls(42, Some("abcDEF123")).unwrap();
+        assert_eq!(
+            static_icon.png,
+            "https://cdn.discordapp.com/icons/42/abcDEF123.png?size=128"
+        );
+        assert!(static_icon.gif.is_none());
+
+        let animated = guild_icon_urls(7, Some("a_deadbeef")).unwrap();
+        assert_eq!(
+            animated.gif.as_deref(),
+            Some("https://cdn.discordapp.com/icons/7/a_deadbeef.gif?size=128")
+        );
+        assert_eq!(
+            animated.png,
+            "https://cdn.discordapp.com/icons/7/a_deadbeef.png?size=128"
+        );
+
+        assert!(guild_icon_urls(1, None).is_none());
+        assert!(guild_icon_urls(1, Some("")).is_none());
+        assert!(guild_icon_urls(1, Some("a_/../x")).is_none());
+        assert!(guild_icon_urls(1, Some("not a hash")).is_none());
+    }
+
+    #[test]
+    fn guild_icons_render_on_the_list_header_and_switcher() {
+        let guilds = vec![
+            UserGuild {
+                id: 10,
+                name: "Pixel Forge".into(),
+                icon: Some("abc123".into()),
+                owner: true,
+                permissions: 0,
+            },
+            UserGuild {
+                id: 11,
+                name: "Night Market".into(),
+                icon: Some("a_cafe".into()),
+                owner: false,
+                permissions: 0,
+            },
+            UserGuild {
+                id: 12,
+                name: "No Icon".into(),
+                icon: None,
+                owner: false,
+                permissions: 0,
+            },
+        ];
+        let list = servers_page(&guilds, &[10, 11, 12], &[], "mod", None, 9, None);
+        assert!(list.contains(
+            "src=\"https://cdn.discordapp.com/icons/10/abc123.png?size=128\""
+        ));
+        assert!(list.contains("alt=\"Pixel Forge\""));
+        assert!(list.contains("width=\"36\""));
+        assert!(list.contains("height=\"36\""));
+        assert!(list.contains("loading=\"lazy\""));
+        assert!(list.contains(
+            "srcset=\"https://cdn.discordapp.com/icons/11/a_cafe.gif?size=128\""
+        ));
+        assert!(list.contains(
+            "src=\"https://cdn.discordapp.com/icons/11/a_cafe.png?size=128\""
+        ));
+        assert!(list.contains(">NI<"));
+        assert!(!list.to_ascii_lowercase().contains("style="));
+
+        let page = app_page(Shell {
+            guild_id: 10,
+            guild_name: "Pixel Forge",
+            guilds: &guilds,
+            username: "mod",
+            avatar: None,
+            user_id: 9,
+            nav: Nav::Overview,
+            configured: true,
+            flash: None,
+            csrf: "token",
+            body: String::new(),
+        });
+        assert!(page.contains("class=\"crumbs\""));
+        assert!(page.contains("avatar avatar-crumb"));
+        assert!(page.contains("width=\"16\""));
+        assert!(page.contains(
+            "src=\"https://cdn.discordapp.com/icons/10/abc123.png?size=128\""
+        ));
+        assert!(page.contains("alt=\"Pixel Forge\""));
+        assert!(page.contains(
+            "srcset=\"https://cdn.discordapp.com/icons/11/a_cafe.gif?size=128\""
+        ));
+        assert!(page.contains(">NI<"));
+        assert!(!page.to_ascii_lowercase().contains("style="));
+        assert!(!page.to_ascii_lowercase().contains("<style"));
     }
 
     #[test]

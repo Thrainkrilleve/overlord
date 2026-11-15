@@ -29,7 +29,7 @@ pub struct RoleChoice {
 pub struct UserGuild {
     pub id: u64,
     pub name: String,
-    #[allow(dead_code)]
+    /// Discord icon hash from the user's guild list (`GET /users/@me/guilds`), the same hash the bot cache stores.
     pub icon: Option<String>,
     pub owner: bool,
     pub permissions: u64,
