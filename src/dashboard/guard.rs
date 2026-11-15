@@ -70,10 +70,130 @@ pub fn esc(text: &str) -> String {
     out
 }
 
-pub fn origin_allowed(origin: Option<&str>, public_url: &str) -> bool {
-    match origin.map(str::trim) {
-        None | Some("") => true,
-        Some(origin) => origin.trim_end_matches('/') == public_url.trim_end_matches('/'),
+#[derive(Clone, Copy)]
+pub struct CsrfSource<'a> {
+    pub origin: Option<&'a str>,
+    pub sec_fetch_site: Option<&'a str>,
+    pub public_url: &'a str,
+    pub host: Option<&'a str>,
+    pub forwarded_host: Option<&'a str>,
+    pub forwarded_proto: Option<&'a str>,
+    pub trust_cloudflare: bool,
+}
+
+/// Whether this POST was sent by the site itself.
+///
+/// A browser form POST always includes `Origin` and `Sec-Fetch-Site`. The
+/// second one is not a header a page can forge: `same-origin` means the form
+/// was loaded from this host, even if `Origin` is not a byte-for-byte match
+/// of `DASHBOARD_PUBLIC_URL` (case, `:443`, or a proxy rewrite). `cross-site`
+/// and `same-site` are rejected. When the browser sends neither header, the
+/// session token is still required by the caller.
+pub fn csrf_source_ok(source: CsrfSource<'_>) -> bool {
+    if let Some(site) = source
+        .sec_fetch_site
+        .map(str::trim)
+        .filter(|site| !site.is_empty())
+    {
+        if site.eq_ignore_ascii_case("same-origin") {
+            return true;
+        }
+        if !site.eq_ignore_ascii_case("none") {
+            return false;
+        }
+    }
+    let Some(origin) = source.origin.map(str::trim).filter(|origin| !origin.is_empty()) else {
+        return true;
+    };
+    expected_origins(&source)
+        .iter()
+        .any(|expected| origins_equal(origin, expected))
+}
+
+fn expected_origins(source: &CsrfSource<'_>) -> Vec<String> {
+    let mut allowed = vec![source.public_url.to_string()];
+    let scheme = external_scheme(source);
+    if let Some(host) = first_host(source.host) {
+        allowed.push(format!("{scheme}://{host}"));
+    }
+    if source.trust_cloudflare {
+        if let Some(host) = first_host(source.forwarded_host) {
+            allowed.push(format!("{scheme}://{host}"));
+        }
+    }
+    allowed
+}
+
+fn external_scheme(source: &CsrfSource<'_>) -> &'static str {
+    if source.trust_cloudflare {
+        if let Some(proto) = first_host(source.forwarded_proto) {
+            if proto.eq_ignore_ascii_case("https") {
+                return "https";
+            }
+            if proto.eq_ignore_ascii_case("http") {
+                return "http";
+            }
+        }
+    }
+    if source.public_url.starts_with("http://") {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+fn first_host(value: Option<&str>) -> Option<&str> {
+    let value = value?.split(',').next()?.trim();
+    if value.is_empty() || value.contains([' ', '/', '?', '#']) {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn origins_equal(left: &str, right: &str) -> bool {
+    match (canonical_origin(left), canonical_origin(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn canonical_origin(raw: &str) -> Option<(String, String)> {
+    let raw = raw.trim().trim_end_matches('/');
+    let (scheme, rest) = raw.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let (host, port) = split_host_port(rest)?;
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let port = match (scheme.as_str(), port) {
+        ("https", "443") | ("http", "80") | (_, "") => String::new(),
+        (_, port) => port.to_string(),
+    };
+    let host = if port.is_empty() {
+        host
+    } else {
+        format!("{host}:{port}")
+    };
+    Some((scheme, host))
+}
+
+fn split_host_port(rest: &str) -> Option<(&str, &str)> {
+    if let Some(host) = rest.strip_prefix('[') {
+        let (host, port) = host.split_once(']')?;
+        let port = port.strip_prefix(':').unwrap_or("");
+        return Some((host, port));
+    }
+    match rest.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) => {
+            Some((host, port))
+        }
+        _ => Some((rest, "")),
     }
 }
 
@@ -183,17 +303,51 @@ mod tests {
         );
     }
 
+    fn source<'a>(origin: Option<&'a str>, site: Option<&'a str>) -> CsrfSource<'a> {
+        CsrfSource {
+            origin,
+            sec_fetch_site: site,
+            public_url: "https://overlord.example.com",
+            host: Some("overlord.example.com"),
+            forwarded_host: None,
+            forwarded_proto: None,
+            trust_cloudflare: false,
+        }
+    }
+
     #[test]
-    fn foreign_origin_is_rejected() {
-        assert!(origin_allowed(None, "https://overlord.example.com"));
-        assert!(origin_allowed(
-            Some("https://overlord.example.com"),
-            "https://overlord.example.com"
-        ));
-        assert!(!origin_allowed(
+    fn same_origin_form_is_accepted_and_a_foreign_one_is_not() {
+        let public = "https://overlord.example.com";
+        assert!(csrf_source_ok(source(None, None)));
+        assert!(csrf_source_ok(source(Some(public), None)));
+        assert!(csrf_source_ok(source(
+            Some("https://OVERLORD.EXAMPLE.COM:443"),
+            None
+        )));
+        assert!(csrf_source_ok(source(
+            Some("https://overlord.example.com/servers/1/verification"),
+            None
+        )));
+        assert!(csrf_source_ok(source(
             Some("https://evil.example"),
-            "https://overlord.example.com"
-        ));
+            Some("same-origin")
+        )));
+        assert!(!csrf_source_ok(source(Some("https://evil.example"), None)));
+        assert!(!csrf_source_ok(source(
+            Some(public),
+            Some("cross-site")
+        )));
+        assert!(!csrf_source_ok(source(Some(public), Some("same-site"))));
+        assert!(!csrf_source_ok(source(Some("http://overlord.example.com"), None)));
+        let mut forwarded = source(Some("https://dash.example"), None);
+        forwarded.public_url = "https://overlord.example.com";
+        forwarded.host = Some("127.0.0.1:8080");
+        forwarded.forwarded_host = Some("dash.example");
+        forwarded.forwarded_proto = Some("https");
+        forwarded.trust_cloudflare = false;
+        assert!(!csrf_source_ok(forwarded));
+        forwarded.trust_cloudflare = true;
+        assert!(csrf_source_ok(forwarded));
     }
 
     #[test]

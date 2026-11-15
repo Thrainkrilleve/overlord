@@ -19,7 +19,7 @@ use crate::database::DbPool;
 use crate::guild_settings;
 
 use super::api::{ApiError, DiscordApi, LiveDiscord, UserGuild};
-use super::guard::{self, client_ip, cookie_value, origin_allowed, set_cookie, RateLimiter};
+use super::guard::{self, client_ip, cookie_value, set_cookie, RateLimiter};
 use super::store::{self, Session};
 use super::validate::{self, Write};
 use super::view::{self, Nav, Shell};
@@ -180,7 +180,11 @@ fn html(status: StatusCode, body: String) -> Response {
         status,
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
+            (header::CACHE_CONTROL, "private, no-store"),
+            (
+                header::HeaderName::from_static("cdn-cache-control"),
+                "no-store",
+            ),
         ],
         body,
     )
@@ -198,6 +202,10 @@ fn redirect(location: &str, cookies: &[String]) -> Response {
             response.headers_mut().append(header::SET_COOKIE, value);
         }
     }
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private, no-store"),
+    );
     response
 }
 
@@ -366,6 +374,7 @@ async fn oauth_callback(
 
 #[derive(Deserialize)]
 struct CsrfForm {
+    #[serde(default)]
     csrf: String,
 }
 
@@ -377,7 +386,7 @@ async fn logout(
     let Some(session) = session_from(&state, &headers).await else {
         return redirect("/", &[]);
     };
-    if !guard::ct_eq(&session.csrf_token, &form.csrf) {
+    if !form_csrf_ok(&state, &headers, &session.csrf_token, &form.csrf) {
         return redirect("/servers?notice=csrf", &[]);
     }
     let _ = store::delete_session(&state.db, &session.id).await;
@@ -656,6 +665,7 @@ async fn audit_page(
 
 #[derive(Deserialize)]
 struct SecurityForm {
+    #[serde(default)]
     csrf: String,
     min_account_age_days: i64,
     raid_join_threshold: i64,
@@ -698,6 +708,7 @@ async fn save_security(
 
 #[derive(Deserialize)]
 struct VerificationForm {
+    #[serde(default)]
     csrf: String,
     verify_channel_id: String,
     member_role_id: String,
@@ -730,6 +741,7 @@ async fn save_verification(
 
 #[derive(Deserialize)]
 struct TicketForm {
+    #[serde(default)]
     csrf: String,
     ticket_category_id: String,
     transcript_channel_id: String,
@@ -771,6 +783,7 @@ async fn save_tickets(
 
 #[derive(Deserialize)]
 struct VoiceForm {
+    #[serde(default)]
     csrf: String,
     join_to_create_channel_id: String,
     voice_category_id: String,
@@ -944,13 +957,7 @@ where
     let Some(session) = session_from(state, headers).await else {
         return redirect("/", &[]);
     };
-    if !origin_allowed(
-        headers
-            .get(header::ORIGIN)
-            .and_then(|value| value.to_str().ok()),
-        &state.cfg.public_url,
-    ) || !guard::ct_eq(&session.csrf_token, csrf)
-    {
+    if !form_csrf_ok(state, headers, &session.csrf_token, csrf) {
         return redirect(&format!("/servers/{guild_id}/{slug}?notice=csrf"), &[]);
     }
     if manageable(state, &session)
@@ -1048,6 +1055,37 @@ where
             }
         }
     }
+}
+
+fn form_csrf_ok(
+    state: &AppState,
+    headers: &HeaderMap,
+    session_token: &str,
+    submitted: &str,
+) -> bool {
+    let token_ok = guard::ct_eq(session_token, submitted.trim());
+    let source_ok = guard::csrf_source_ok(guard::CsrfSource {
+        origin: header_text(headers, header::ORIGIN),
+        sec_fetch_site: header_text(headers, "sec-fetch-site"),
+        public_url: &state.cfg.public_url,
+        host: header_text(headers, header::HOST),
+        forwarded_host: header_text(headers, "x-forwarded-host"),
+        forwarded_proto: header_text(headers, "x-forwarded-proto"),
+        trust_cloudflare: state.cfg.trust_cloudflare,
+    });
+    if !source_ok {
+        tracing::warn!("dashboard form rejected because the browser origin is not this site");
+    } else if !token_ok {
+        tracing::warn!("dashboard form rejected because the csrf token does not match this session");
+    }
+    token_ok && source_ok
+}
+
+fn header_text<K>(headers: &HeaderMap, name: K) -> Option<&str>
+where
+    K: header::AsHeaderName,
+{
+    headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 fn optional_id(value: &str) -> Result<Option<u64>, &'static str> {
@@ -1461,6 +1499,221 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let saved = crate::guild_settings::load(&db, 10).await.unwrap();
         assert_eq!(saved.staff_role_list(), vec![20, 21]);
+    }
+
+    fn settings_app(db: crate::database::DbPool) -> Router {
+        router(AppState {
+            db,
+            cfg: dashboard_cfg(),
+            discord: Arc::new(Fake {
+                guilds: vec![UserGuild {
+                    id: 10,
+                    name: "Pixel Forge".into(),
+                    icon: None,
+                    owner: false,
+                    permissions: guard::MANAGE_GUILD,
+                }],
+                channels: vec![
+                    super::super::api::ChannelChoice {
+                        id: 555,
+                        name: "mod-logs".into(),
+                        kind: super::super::api::ChannelKind::Text,
+                    },
+                    super::super::api::ChannelChoice {
+                        id: 30,
+                        name: "tickets".into(),
+                        kind: super::super::api::ChannelKind::Category,
+                    },
+                    super::super::api::ChannelChoice {
+                        id: 31,
+                        name: "transcripts".into(),
+                        kind: super::super::api::ChannelKind::Text,
+                    },
+                    super::super::api::ChannelChoice {
+                        id: 40,
+                        name: "create".into(),
+                        kind: super::super::api::ChannelKind::Voice,
+                    },
+                ],
+                roles: vec![super::super::api::RoleChoice {
+                    id: 20,
+                    name: "Staff".into(),
+                }],
+                bot_guilds: vec![10],
+            }),
+            limiter: Arc::new(RateLimiter::default()),
+        })
+    }
+
+    fn settings_csrf(html: &str) -> String {
+        let start = html
+            .find("<form method=\"post\" data-save>")
+            .expect("settings form");
+        let form = &html[start..];
+        let end = form.find("</form>").expect("form end");
+        let form = &form[..end];
+        let marker = "name=\"csrf\" value=\"";
+        let at = form.find(marker).expect("csrf field") + marker.len();
+        let value = &form[at..];
+        value[..value.find('"').expect("csrf end")].to_string()
+    }
+
+    async fn settings_request(db: &crate::database::DbPool, request: Request<Body>) -> Response {
+        settings_app(db.clone())
+            .oneshot(request)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn each_settings_page_saves_with_its_own_token() {
+        let db = crate::database::test_pool("dash-csrf").await;
+        let mut session = session(&db).await;
+        session.csrf_token = "ab-cd_ef".into();
+        sqlx::query("UPDATE dashboard_sessions SET csrf_token = ? WHERE id = ?")
+            .bind(&session.csrf_token)
+            .bind(&session.id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let pages = [
+            (
+                "/servers/10/security",
+                "min_account_age_days=4&raid_join_threshold=5&raid_window_seconds=10&raid_action=alert&unverified_role_id=&mod_log_channel_id=555&honeypot_channel_id=",
+                "mod log",
+            ),
+            (
+                "/servers/10/verification",
+                "verify_channel_id=555&member_role_id=20&unverified_role_id=",
+                "member role",
+            ),
+            (
+                "/servers/10/tickets",
+                "ticket_category_id=30&transcript_channel_id=31&max_open_tickets=2",
+                "ticket category",
+            ),
+            (
+                "/servers/10/voice",
+                "join_to_create_channel_id=40&voice_category_id=30",
+                "join to create",
+            ),
+        ];
+        for (path, fields, _label) in pages {
+            let response = settings_request(
+                &db,
+                Request::builder()
+                    .uri(path)
+                    .header("cookie", "overlord_session=session-test")
+                    .header("origin", "https://overlord.example.com")
+                    .header("sec-fetch-site", "same-origin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let html = String::from_utf8(
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            let token = settings_csrf(&html);
+            assert_eq!(token, session.csrf_token, "{path}");
+            assert!(html.contains("name=\"csrf\""));
+
+            let wrong = settings_request(
+                &db,
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", "overlord_session=session-test")
+                    .header("origin", "https://overlord.example.com")
+                    .header("sec-fetch-site", "same-origin")
+                    .body(Body::from(format!("csrf=not-the-token&{fields}")))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(wrong.status(), StatusCode::SEE_OTHER, "{path} wrong token");
+            assert!(wrong
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("notice=csrf"));
+
+            let missing = settings_request(
+                &db,
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", "overlord_session=session-test")
+                    .header("origin", "https://overlord.example.com")
+                    .header("sec-fetch-site", "same-origin")
+                    .body(Body::from(fields.to_string()))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(missing.status(), StatusCode::SEE_OTHER, "{path} missing token");
+            assert!(missing
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("notice=csrf"));
+
+            let foreign = settings_request(
+                &db,
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", "overlord_session=session-test")
+                    .header("origin", "https://evil.example")
+                    .header("sec-fetch-site", "cross-site")
+                    .body(Body::from(format!("csrf={token}&{fields}")))
+                    .unwrap(),
+            )
+            .await;
+            assert!(foreign
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("notice=csrf"));
+
+            let saved = settings_request(
+                &db,
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", "overlord_session=session-test")
+                    .header("host", "overlord.example.com")
+                    .header("origin", "https://OVERLORD.EXAMPLE.COM:443")
+                    .body(Body::from(format!("csrf={token}&{fields}")))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(saved.status(), StatusCode::SEE_OTHER, "{path} fresh token");
+            assert!(saved
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("notice=saved"));
+        }
+        let settings = crate::guild_settings::load(&db, 10).await.unwrap();
+        assert_eq!(settings.mod_log_channel_id, Some(555));
+        assert_eq!(settings.member_role_id, Some(20));
+        assert_eq!(settings.ticket_category_id, Some(30));
+        assert_eq!(settings.join_to_create_channel_id, Some(40));
     }
 
     #[tokio::test]
