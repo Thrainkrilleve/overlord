@@ -29,9 +29,25 @@ button, input, select { font: inherit; color: inherit; }
 .muted { color: var(--muted); }
 .fine { color: var(--muted); font-size: 13px; line-height: 1.5; }
 .gold { color: var(--gold-2); }
-.mark { color: var(--gold); display: block; }
+.mark, .icon {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  vertical-align: middle;
+}
+.mark { color: var(--gold); stroke-width: 3; }
+.mark-sm { width: 22px; height: 22px; }
+.mark-16 { width: 16px; height: 16px; }
+.mark-18 { width: 18px; height: 18px; }
+.mark-20 { width: 20px; height: 20px; }
+.mark-lg { width: 220px; height: 220px; display: block; }
+.pupil, .icon-solid { fill: currentColor; stroke: none; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -0.02em; }
-.brand .mark { display: inline-block; vertical-align: middle; }
+a.discord-btn { text-decoration: none; }
+.is-hidden { display: none; }
 
 .login-body { min-height: 100vh; }
 .login-split { display: grid; grid-template-columns: 1.15fr 0.85fr; min-height: 100vh; }
@@ -172,7 +188,7 @@ input[type="range"] { width: 100%; accent-color: var(--gold); }
   position: sticky; bottom: 16px; display: flex; justify-content: space-between; align-items: center;
   gap: 12px; padding: 12px 14px; border-radius: 14px; background: #10182a; border: 1px solid var(--line);
 }
-.savebar[hidden] { display: none; }
+.savebar.is-hidden { display: none; }
 .ticket-layout { grid-template-columns: 1.2fr 0.8fr; align-items: start; }
 .preview-card { border: 1px solid rgba(228,177,92,0.4); border-radius: 16px; padding: 16px; }
 .preview-btn { border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin: 8px 0; }

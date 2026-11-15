@@ -4,7 +4,7 @@ if (search) {
     const needle = search.value.trim().toLowerCase();
     document.querySelectorAll("[data-server]").forEach((card) => {
       const name = card.getAttribute("data-server") || "";
-      card.hidden = needle.length > 0 && !name.includes(needle);
+      card.classList.toggle("is-hidden", needle.length > 0 && !name.includes(needle));
     });
   });
 }
@@ -32,7 +32,7 @@ if (form && bar) {
   const check = () => {
     syncAge();
     const now = new URLSearchParams(new FormData(form)).toString();
-    bar.hidden = now === snapshot;
+    bar.classList.toggle("is-hidden", now === snapshot);
   };
   form.addEventListener("input", check);
   form.addEventListener("change", check);

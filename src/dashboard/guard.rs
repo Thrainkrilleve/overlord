@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
+/// Blocks inline styles and scripts. Sign-in is a normal link, so `form-action`
+/// stays `'self'` and does not need to allow discord.com.
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://cdn.discordapp.com; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+
 pub const ADMINISTRATOR: u64 = 1 << 3;
 pub const MANAGE_GUILD: u64 = 1 << 5;
 
